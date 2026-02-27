@@ -11,16 +11,20 @@ from src.database.repo import VaultRepository, VaultEntryInput
 from src.gui.main_window import MainWindow
 from src.gui.setup_wizard import SetupWizard
 
-
+print("STEP 1: start")
 def main() -> None:
     cfg = load_config()
-
     app = MainWindow()
-    app.withdraw()
-
+    app.deiconify()
+    app.lift()
+    app.focus_force()
     wizard = SetupWizard(app)
-    app.wait_window(wizard)
+    app.after(100, lambda: print("Wizard exists?", wizard.winfo_exists()))
+    app.after(200, wizard.lift)
+    app.after(300, wizard.focus_force)
 
+    app.mainloop()
+    return
     if wizard.result is None:
         app.destroy()
         return

@@ -52,8 +52,9 @@ class SetupWizard(tk.Toplevel):
         ttk.Button(btns, text="Create", command=self.submit).grid(row=0, column=1)
 
         self.columnconfigure(0, weight=1)
-        self.grab_set()
+
         self.transient(master)
+
 
     def browse(self):
         path = filedialog.asksaveasfilename(defaultextension=".db", filetypes=[("SQLite DB", "*.db")])
