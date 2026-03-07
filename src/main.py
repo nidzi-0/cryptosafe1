@@ -8,26 +8,19 @@ from src.core.crypto.placeholder import AES256Placeholder
 from src.core.state_manager import StateManager
 from src.database.db import Database
 from src.database.repo import VaultRepository, VaultEntryInput
+from src.database.settings_repo import SettingsRepository
 from src.gui.main_window import MainWindow
 from src.gui.setup_wizard import SetupWizard
 
-print("ШАГ 1: запуск")
 
 def main() -> None:
     cfg = load_config()
+
     app = MainWindow()
-    app.deiconify()
-    app.lift()
-    app.focus_force()
+    app.withdraw()
 
     wizard = SetupWizard(app)
-
-    app.after(100, lambda: print("Окно мастера существует?", wizard.winfo_exists()))
-    app.after(200, wizard.lift)
-    app.after(300, wizard.focus_force)
-
-    app.mainloop()
-    return
+    app.wait_window(wizard)
 
     if wizard.result is None:
         app.destroy()
@@ -41,6 +34,11 @@ def main() -> None:
     key = km.derive_key(wizard.result.master_password, salt, KeyDerivationParams())
     crypto = AES256Placeholder()
 
+    settings_repo = SettingsRepository(db, crypto, key)
+    settings_repo.set_setting("theme", "light", encrypted=False)
+    settings_repo.set_setting("clipboard_timeout", str(cfg.clipboard_timeout_sec), encrypted=False)
+    settings_repo.set_setting("master_password_hint", "пример подсказки", encrypted=True)
+
     state = StateManager()
     state.set_unlocked(True)
 
@@ -50,7 +48,7 @@ def main() -> None:
     bus.subscribe(UserLoggedIn, audit.on_login)
     bus.subscribe(EntryAdded, audit.on_entry_added)
 
-    bus.publish(UserLoggedIn(user="local"))
+    bus.publish(UserLoggedIn(user="локально"))
 
     repo = VaultRepository(db, crypto, key)
     new_id = repo.add_entry(
