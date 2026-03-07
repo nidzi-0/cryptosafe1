@@ -14,7 +14,7 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
-    env = os.getenv("CRYPTOSAFE_ENV", "dev").strip() or "dev"
+    env = os.getenv("CRYPTOSAFE_ENV", "разработка").strip() or "разработка"
     db_path_str = os.getenv("CRYPTOSAFE_DB", "").strip()
 
     if db_path_str:

@@ -16,17 +16,17 @@ class KeyManager:
             params = KeyDerivationParams()
 
         if not isinstance(password, str) or len(password) < 8:
-            raise ValueError("Password must be a string with length >= 8")
+            raise ValueError("Пароль должен быть строкой длиной не менее 8 символов")
         if not isinstance(salt, (bytes, bytearray)) or len(salt) < 16:
-            raise ValueError("Salt must be bytes (>=16)")
+            raise ValueError("Соль должна иметь тип bytes или bytearray и длину не менее 16 байт")
 
         return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes(salt), params.iterations, dklen=32)
 
     def store_key(self) -> None:
-        raise NotImplementedError("Sprint 1 placeholder")
+        raise NotImplementedError("Заглушка")
 
     def load_key(self) -> None:
-        raise NotImplementedError("Sprint 1 placeholder")
+        raise NotImplementedError("Заглушка")
 
 
 def generate_salt(n: int = 16) -> bytes:

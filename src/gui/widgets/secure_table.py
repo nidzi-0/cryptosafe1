@@ -7,8 +7,8 @@ class SecureTable(ttk.Frame):
         super().__init__(master, **kwargs)
 
         self.tree = ttk.Treeview(self, columns=("title", "username", "url"), show="headings", height=12)
-        self.tree.heading("title", text="Title")
-        self.tree.heading("username", text="Username")
+        self.tree.heading("title", text="Название")
+        self.tree.heading("username", text="Имя пользователя")
         self.tree.heading("url", text="URL")
 
         self.tree.column("title", width=220, anchor="w")

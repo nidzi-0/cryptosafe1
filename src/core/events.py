@@ -24,12 +24,12 @@ class EntryDeleted:
 
 @dataclass(frozen=True)
 class UserLoggedIn:
-    user: str = "local"
+    user: str = "локально"
 
 
 @dataclass(frozen=True)
 class UserLoggedOut:
-    user: str = "local"
+    user: str = "локально"
 
 
 @dataclass(frozen=True)

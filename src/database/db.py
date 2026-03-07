@@ -32,7 +32,7 @@ class Database:
         conn.commit()
 
     def backup_stub(self) -> None:
-        raise NotImplementedError("Sprint 1 placeholder")
+        raise NotImplementedError("Заглушка")
 
     def restore_stub(self) -> None:
-        raise NotImplementedError("Sprint 1 placeholder")
+        raise NotImplementedError("Заглушка")

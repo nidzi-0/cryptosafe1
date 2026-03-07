@@ -11,20 +11,24 @@ from src.database.repo import VaultRepository, VaultEntryInput
 from src.gui.main_window import MainWindow
 from src.gui.setup_wizard import SetupWizard
 
-print("STEP 1: start")
+print("ШАГ 1: запуск")
+
 def main() -> None:
     cfg = load_config()
     app = MainWindow()
     app.deiconify()
     app.lift()
     app.focus_force()
+
     wizard = SetupWizard(app)
-    app.after(100, lambda: print("Wizard exists?", wizard.winfo_exists()))
+
+    app.after(100, lambda: print("Окно мастера существует?", wizard.winfo_exists()))
     app.after(200, wizard.lift)
     app.after(300, wizard.focus_force)
 
     app.mainloop()
     return
+
     if wizard.result is None:
         app.destroy()
         return
@@ -51,18 +55,18 @@ def main() -> None:
     repo = VaultRepository(db, crypto, key)
     new_id = repo.add_entry(
         VaultEntryInput(
-            title="Demo Entry",
-            username="demo",
-            password="demo_password",
+            title="Демонстрационная запись",
+            username="пользователь",
+            password="демо_пароль",
             url="https://example.com",
-            notes="demo notes",
-            tags="demo",
+            notes="демонстрационные заметки",
+            tags="демо",
         )
     )
-    bus.publish(EntryAdded(entry_id=new_id, title="Demo Entry"))
+    bus.publish(EntryAdded(entry_id=new_id, title="Демонстрационная запись"))
 
     app.deiconify()
-    app.status_var.set(f"Status: unlocked | Clipboard timer: {cfg.clipboard_timeout_sec}s (placeholder)")
+    app.status_var.set(f"Статус: разблокировано | Таймер буфера обмена: {cfg.clipboard_timeout_sec} c (заглушка)")
     app.mainloop()
 
 

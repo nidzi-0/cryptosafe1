@@ -30,13 +30,13 @@ class VaultRepository:
     @staticmethod
     def _validate(data: VaultEntryInput) -> None:
         if not isinstance(data.title, str) or not data.title.strip():
-            raise ValueError("Title is required")
+            raise ValueError("Требуется заголовок")
         if len(data.title) > 200:
-            raise ValueError("Title too long")
+            raise ValueError("Слишком длинный заголовок")
         if not isinstance(data.password, str) or len(data.password) < 1:
-            raise ValueError("Password is required")
+            raise ValueError("Требуется пароль")
         if data.url is not None and len(data.url) > 500:
-            raise ValueError("URL too long")
+            raise ValueError("Слишком длинный URL")
 
     def add_entry(self, data: VaultEntryInput) -> int:
         self._validate(data)
