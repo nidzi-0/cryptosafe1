@@ -5,7 +5,7 @@ from tkinter import messagebox, ttk
 
 from src.gui.widgets.secure_table import SecureTable
 from src.gui.widgets.audit_log_viewer import AuditLogViewer
-
+from src.gui.settings_dialog import SettingsDialog
 
 class MainWindow(tk.Tk):
     def __init__(self):
@@ -58,7 +58,7 @@ class MainWindow(tk.Tk):
         AuditLogViewer(win).pack(fill="both", expand=True, padx=10, pady=10)
 
     def _stub_settings(self):
-        messagebox.showinfo("Settings", "Settings dialog placeholder (Sprint 1).")
+        SettingsDialog(self)
 
     def about(self):
         messagebox.showinfo("About", "CryptoSafe Manager — Sprint 1 foundation")

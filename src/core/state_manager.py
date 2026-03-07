@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import threading
 import time
+import secrets
 from dataclasses import dataclass
 
-
 def wipe_bytearray(buf: bytearray) -> None:
+    if not isinstance(buf, bytearray):
+        raise TypeError("Expected bytearray")
+    for i in range(len(buf)):
+        buf[i] = secrets.randbelow(256)
     for i in range(len(buf)):
         buf[i] = 0
-
 
 @dataclass
 class SessionState:
