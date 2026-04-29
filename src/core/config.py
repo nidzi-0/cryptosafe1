@@ -14,7 +14,7 @@ class AppConfig:
 
 
 def load_config() -> AppConfig:
-    env = os.getenv("CRYPTOSAFE_ENV", "разработка").strip() or "разработка"
+    env = os.getenv("CRYPTOSAFE_ENV", "dev").strip() or "dev"
     db_path_str = os.getenv("CRYPTOSAFE_DB", "").strip()
 
     if db_path_str:
@@ -22,4 +22,9 @@ def load_config() -> AppConfig:
     else:
         db_path = Path.cwd() / "data" / f"vault_{env}.db"
 
-    return AppConfig(env=env, db_path=db_path)
+    return AppConfig(
+        env=env,
+        db_path=db_path,
+        clipboard_timeout_sec=30,
+        auto_lock_idle_sec=0,
+    )

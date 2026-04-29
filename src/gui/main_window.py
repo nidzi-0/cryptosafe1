@@ -6,6 +6,7 @@ from tkinter import messagebox, ttk
 from src.gui.widgets.secure_table import SecureTable
 from src.gui.widgets.audit_log_viewer import AuditLogViewer
 from src.gui.settings_dialog import SettingsDialog
+from src.gui.change_password_dialog import ChangePasswordDialog
 
 
 class MainWindow(tk.Tk):
@@ -13,6 +14,8 @@ class MainWindow(tk.Tk):
         super().__init__()
         self.title("CryptoSafe Manager")
         self.geometry("760x440")
+
+        self.auth_service = None
 
         self._build_menu()
 
@@ -24,6 +27,9 @@ class MainWindow(tk.Tk):
         self.status = ttk.Label(self, textvariable=self.status_var, anchor="w")
         self.status.pack(fill="x", side="bottom", padx=10, pady=(0, 8))
 
+    def set_auth_service(self, auth_service):
+        self.auth_service = auth_service
+
     def _build_menu(self):
         menubar = tk.Menu(self)
 
@@ -31,6 +37,8 @@ class MainWindow(tk.Tk):
         file_menu.add_command(label="Создать", command=self._stub)
         file_menu.add_command(label="Открыть", command=self._stub)
         file_menu.add_command(label="Резервная копия", command=self._stub)
+        file_menu.add_separator()
+        file_menu.add_command(label="Сменить мастер-пароль", command=self.change_master_password)
         file_menu.add_separator()
         file_menu.add_command(label="Выход", command=self.destroy)
 
@@ -55,14 +63,41 @@ class MainWindow(tk.Tk):
 
     def open_logs(self):
         win = tk.Toplevel(self)
-        win.title("Журнал аудита (заглушка)")
+        win.title("Журнал аудита")
         AuditLogViewer(win).pack(fill="both", expand=True, padx=10, pady=10)
 
     def _stub_settings(self):
         SettingsDialog(self)
 
+    def change_master_password(self):
+        if self.auth_service is None:
+            messagebox.showerror("Ошибка", "Сервис аутентификации не подключён.")
+            return
+
+        dialog = ChangePasswordDialog(self)
+        dialog.geometry("500x300+320+220")
+        dialog.lift()
+        dialog.focus_force()
+
+        self.wait_window(dialog)
+
+        if dialog.result is None:
+            return
+
+        result = self.auth_service.change_master_password(
+            dialog.result.current_password,
+            dialog.result.new_password,
+        )
+
+        if not result.success:
+            messagebox.showerror("Ошибка смены пароля", "\n".join(result.errors))
+            return
+
+        messagebox.showinfo("Готово", "Мастер-пароль успешно изменён. Выполните вход заново.")
+        self.status_var.set("Статус: заблокировано | Мастер-пароль изменён")
+
     def about(self):
-        messagebox.showinfo("О программе", "CryptoSafe Manager")
+        messagebox.showinfo("О программе", "CryptoSafe Manager — Спринт 2: мастер-пароль и управление ключами")
 
     def _stub(self):
-        messagebox.showinfo("Заглушка")
+        messagebox.showinfo("Заглушка", "Это действие будет реализовано в следующих этапах проекта.")

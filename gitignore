@@ -1,9 +1,13 @@
-.idea/
-.venv/
-venv/
-
+# Python
 __pycache__/
 *.pyc
 
-data/
-*.db
+# Virtual env
+.venv/
+
+# PyCharm
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

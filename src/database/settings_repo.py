@@ -13,7 +13,6 @@ class SettingsRepository:
     def set_setting(self, setting_key: str, setting_value: str, encrypted: bool = False) -> None:
         conn = self.db.connect()
 
-        value_to_store: bytes
         if encrypted:
             value_to_store = self.crypto.encrypt(setting_value.encode("utf-8"), self.key)
         else:
@@ -24,8 +23,8 @@ class SettingsRepository:
             INSERT INTO settings(setting_key, setting_value, encrypted)
             VALUES(?, ?, ?)
             ON CONFLICT(setting_key) DO UPDATE SET
-                setting_value=excluded.setting_value,
-                encrypted=excluded.encrypted
+                setting_value = excluded.setting_value,
+                encrypted = excluded.encrypted
             """,
             (setting_key, value_to_store, int(encrypted)),
         )

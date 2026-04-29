@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-SCHEMA_SQL = """
-PRAGMA foreign_keys = ON;
 
+SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS vault_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     title TEXT NOT NULL,
@@ -24,8 +23,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     timestamp TEXT NOT NULL,
     entry_id INTEGER,
     details TEXT,
-    signature BLOB,
-    FOREIGN KEY(entry_id) REFERENCES vault_entries(id) ON DELETE SET NULL
+    signature BLOB
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(timestamp);
@@ -42,10 +40,10 @@ CREATE INDEX IF NOT EXISTS idx_settings_key ON settings(setting_key);
 
 CREATE TABLE IF NOT EXISTS key_store (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    key_type TEXT NOT NULL,
-    salt BLOB NOT NULL,
-    hash BLOB,
-    params TEXT
+    key_type TEXT NOT NULL UNIQUE,
+    key_data BLOB NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_keystore_type ON key_store(key_type);
