@@ -89,7 +89,13 @@ def main() -> None:
     db.init_schema()
 
     key_store = KeyStoreRepository(db)
-    auth_service = AuthService(key_store)
+    bus = EventBus()
+    audit = AuditLogger(db)
+
+    bus.subscribe(UserLoggedIn, audit.on_login)
+    bus.subscribe(EntryAdded, audit.on_entry_added)
+
+    auth_service = AuthService(key_store, bus)
 
     if not auth_service.is_configured():
         wizard = SetupWizard(app)
@@ -143,9 +149,9 @@ def main() -> None:
         app.destroy()
         return
 
-    crypto = AES256Placeholder()
+    crypto = AES256Placeholder(auth_service)
 
-    settings_repo = SettingsRepository(db, crypto, encryption_key)
+    settings_repo = SettingsRepository(db, crypto)
     settings_repo.set_setting("clipboard_timeout_sec", str(cfg.clipboard_timeout_sec), encrypted=False)
     settings_repo.set_setting("auto_lock_idle_sec", str(cfg.auto_lock_idle_sec), encrypted=False)
     settings_repo.set_setting("theme", "light", encrypted=False)
@@ -166,7 +172,7 @@ def main() -> None:
 
     bus.publish(UserLoggedIn(user="локально"))
 
-    repo = VaultRepository(db, crypto, encryption_key)
+    repo = VaultRepository(db, crypto)
 
     try:
         create_demo_entry_once(repo, bus)
@@ -176,7 +182,17 @@ def main() -> None:
     app.status_var.set(
         f"Статус: разблокировано | Таймер буфера обмена: {cfg.clipboard_timeout_sec} c"
     )
+    def on_window_focus_out(event=None):
+        auth_service.auth_manager.on_focus_lost()
+        app.status_var.set("Статус: заблокировано | Ключ очищен из памяти")
 
+    def on_window_minimized(event=None):
+        if app.state() == "iconic":
+            auth_service.auth_manager.on_window_minimized()
+            app.status_var.set("Статус: заблокировано | Приложение свернуто, ключ очищен")
+
+    app.bind("<FocusOut>", on_window_focus_out)
+    app.bind("<Unmap>", on_window_minimized)
     app.protocol("WM_DELETE_WINDOW", lambda: (auth_service.logout(), app.destroy()))
     app.mainloop()
 

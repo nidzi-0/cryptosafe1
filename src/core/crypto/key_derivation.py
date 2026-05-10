@@ -4,11 +4,12 @@ import os
 import re
 import secrets
 import hashlib
+import base64
 from dataclasses import dataclass
 from typing import Dict, List
 
 from argon2 import PasswordHasher, Type
-from argon2.exceptions import VerifyMismatchError, VerificationError
+from argon2.low_level import hash_secret_raw
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,7 @@ class PasswordPolicy:
             errors.append("Пароль должен содержать специальный символ")
 
         normalized = password.lower()
+
         for pattern in COMMON_WEAK_PATTERNS:
             if pattern in normalized:
                 errors.append("Пароль содержит распространённый слабый шаблон")
@@ -133,31 +135,107 @@ class KeyDerivationManager:
 
     def verify_password(self, password: str, stored_hash: str) -> bool:
         try:
-            ok = self.argon2_hasher.verify(stored_hash, password)
-            return secrets.compare_digest(str(ok).encode("utf-8"), b"True")
-        except (VerifyMismatchError, VerificationError, Exception):
-            secrets.compare_digest(b"invalid-password-check", b"invalid-password-check")
+            params = self._parse_argon2_hash(stored_hash)
+
+            calculated_hash = hash_secret_raw(
+                secret=password.encode("utf-8"),
+                salt=params["salt"],
+                time_cost=params["time_cost"],
+                memory_cost=params["memory_cost"],
+                parallelism=params["parallelism"],
+                hash_len=len(params["hash"]),
+                type=Type.ID,
+            )
+
+            return secrets.compare_digest(calculated_hash, params["hash"])
+
+        except Exception:
+            dummy_actual = hash_secret_raw(
+                secret=b"dummy-password",
+                salt=b"0" * 16,
+                time_cost=3,
+                memory_cost=65536,
+                parallelism=4,
+                hash_len=32,
+                type=Type.ID,
+            )
+            dummy_expected = b"0" * 32
+            secrets.compare_digest(dummy_actual, dummy_expected)
             return False
+
+    @staticmethod
+    def _decode_argon2_base64(value: str) -> bytes:
+        padding = "=" * (-len(value) % 4)
+        return base64.b64decode(value + padding)
+
+    def _parse_argon2_hash(self, stored_hash: str) -> dict:
+        parts = stored_hash.split("$")
+
+        if len(parts) != 6:
+            raise ValueError("Некорректный формат Argon2-хэша")
+
+        algorithm = parts[1]
+
+        if algorithm != "argon2id":
+            raise ValueError("Ожидался Argon2id")
+
+        params_part = parts[3]
+        salt_part = parts[4]
+        hash_part = parts[5]
+
+        parsed_params = {}
+
+        for item in params_part.split(","):
+            key, value = item.split("=")
+            parsed_params[key] = int(value)
+
+        return {
+            "time_cost": parsed_params["t"],
+            "memory_cost": parsed_params["m"],
+            "parallelism": parsed_params["p"],
+            "salt": self._decode_argon2_base64(salt_part),
+            "hash": self._decode_argon2_base64(hash_part),
+        }
 
     def generate_encryption_salt(self) -> bytes:
         return os.urandom(self.pbkdf2_params.salt_len)
 
-    def derive_encryption_key(self, password: str, salt: bytes) -> bytes:
+    def derive_key(
+        self,
+        password: str,
+        salt: bytes,
+        purpose: str = "encryption",
+    ) -> bytes:
         if not isinstance(password, str) or not password:
             raise ValueError("Пароль должен быть непустой строкой")
 
         if not isinstance(salt, (bytes, bytearray)) or len(salt) < self.pbkdf2_params.salt_len:
             raise ValueError("Соль PBKDF2 должна быть байтами длиной не менее 16")
 
+        allowed_purposes = {
+            "encryption",
+            "audit",
+            "export",
+            "totp",
+        }
+
+        if purpose not in allowed_purposes:
+            raise ValueError(f"Неизвестный тип ключа: {purpose}")
+
+        purpose_bytes = purpose.encode("utf-8")
+
         return hashlib.pbkdf2_hmac(
             "sha256",
-            password.encode("utf-8"),
+            password.encode("utf-8") + purpose_bytes,
             bytes(salt),
             self.pbkdf2_params.iterations,
             dklen=self.pbkdf2_params.key_len,
         )
 
-    def export_params(self) -> Dict[str, int]:
+    def derive_encryption_key(self, password: str, salt: bytes) -> bytes:
+        return self.derive_key(password, salt, purpose="encryption")
+
+    def export_params(self) -> Dict[str, int | str]:
         return {
             "argon2_time_cost": self.argon2_params.time_cost,
             "argon2_memory_cost": self.argon2_params.memory_cost,
@@ -167,4 +245,5 @@ class KeyDerivationManager:
             "pbkdf2_iterations": self.pbkdf2_params.iterations,
             "pbkdf2_salt_len": self.pbkdf2_params.salt_len,
             "pbkdf2_key_len": self.pbkdf2_params.key_len,
+            "supported_key_purposes": "encryption,audit,export,totp",
         }

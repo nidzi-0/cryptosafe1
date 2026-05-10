@@ -18,7 +18,7 @@ class AuthSession:
 class AuthenticationManager:
     def __init__(self) -> None:
         self.kdf = KeyDerivationManager()
-        self.cache = KeyCache()
+        self.cache = KeyCache(ttl_seconds=3600, clear_on_focus_lost=True)
         self.session = AuthSession()
 
     def _delay_for_failures(self) -> int:
@@ -43,10 +43,11 @@ class AuthenticationManager:
         }
 
     def login(self, password: str, stored_hash: str, enc_salt: bytes) -> bool:
+        self.cache.on_focus_restored()
+
         if not self.kdf.verify_password(password, stored_hash):
             self.session.failed_attempts += 1
-            delay = self._delay_for_failures()
-            time.sleep(delay)
+            time.sleep(self._delay_for_failures())
             return False
 
         key = self.kdf.derive_encryption_key(password, enc_salt)
@@ -85,6 +86,14 @@ class AuthenticationManager:
 
     def on_focus_lost(self) -> None:
         self.cache.on_focus_lost()
+        self.session.logged_in = False
+
+    def on_focus_restored(self) -> None:
+        self.cache.on_focus_restored()
+
+    def on_window_minimized(self) -> None:
+        self.cache.on_window_minimized()
+        self.session.logged_in = False
 
     def on_auto_lock(self) -> None:
         self.cache.on_auto_lock()

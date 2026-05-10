@@ -5,16 +5,15 @@ from .db import Database
 
 
 class SettingsRepository:
-    def __init__(self, db: Database, crypto: EncryptionService, key: bytes) -> None:
+    def __init__(self, db: Database, crypto: EncryptionService) -> None:
         self.db = db
         self.crypto = crypto
-        self.key = key
 
     def set_setting(self, setting_key: str, setting_value: str, encrypted: bool = False) -> None:
         conn = self.db.connect()
 
         if encrypted:
-            value_to_store = self.crypto.encrypt(setting_value.encode("utf-8"), self.key)
+            value_to_store = self.crypto.encrypt(setting_value.encode("utf-8"))
         else:
             value_to_store = setting_value.encode("utf-8")
 
@@ -47,6 +46,6 @@ class SettingsRepository:
             return None
 
         if encrypted:
-            return self.crypto.decrypt(raw_value, self.key).decode("utf-8")
+            return self.crypto.decrypt(raw_value).decode("utf-8")
 
         return raw_value.decode("utf-8")

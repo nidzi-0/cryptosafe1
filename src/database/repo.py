@@ -22,10 +22,9 @@ class VaultEntryInput:
 
 
 class VaultRepository:
-    def __init__(self, db: Database, crypto: EncryptionService, key: bytes) -> None:
+    def __init__(self, db: Database, crypto: EncryptionService) -> None:
         self.db = db
         self.crypto = crypto
-        self.key = key
 
     @staticmethod
     def _validate(data: VaultEntryInput) -> None:
@@ -46,13 +45,13 @@ class VaultRepository:
 
         username_enc = None
         if data.username:
-            username_enc = self.crypto.encrypt(data.username.encode("utf-8"), self.key)
+            username_enc = self.crypto.encrypt(data.username.encode("utf-8"))
 
-        password_enc = self.crypto.encrypt(data.password.encode("utf-8"), self.key)
+        password_enc = self.crypto.encrypt(data.password.encode("utf-8"))
 
         notes_enc = None
         if data.notes:
-            notes_enc = self.crypto.encrypt(data.notes.encode("utf-8"), self.key)
+            notes_enc = self.crypto.encrypt(data.notes.encode("utf-8"))
 
         cur = conn.execute(
             """
@@ -63,3 +62,49 @@ class VaultRepository:
         )
         conn.commit()
         return int(cur.lastrowid)
+
+    def reencrypt_all_entries(self, old_crypto: EncryptionService, new_crypto: EncryptionService) -> int:
+        conn = self.db.connect()
+        rows = conn.execute(
+            """
+            SELECT id, username, encrypted_password, notes
+            FROM vault_entries
+            """
+        ).fetchall()
+
+        updated_count = 0
+        now = utc_now_iso()
+
+        for row in rows:
+            username_plain = None
+            if row["username"] is not None:
+                username_plain = old_crypto.decrypt(row["username"])
+
+            password_plain = old_crypto.decrypt(row["encrypted_password"])
+
+            notes_plain = None
+            if row["notes"] is not None:
+                notes_plain = old_crypto.decrypt(row["notes"])
+
+            username_new = None
+            if username_plain is not None:
+                username_new = new_crypto.encrypt(username_plain)
+
+            password_new = new_crypto.encrypt(password_plain)
+
+            notes_new = None
+            if notes_plain is not None:
+                notes_new = new_crypto.encrypt(notes_plain)
+
+            conn.execute(
+                """
+                UPDATE vault_entries
+                SET username = ?, encrypted_password = ?, notes = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (username_new, password_new, notes_new, now, row["id"]),
+            )
+
+            updated_count += 1
+
+        return updated_count
