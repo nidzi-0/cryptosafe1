@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from tkinter import filedialog, messagebox
-
 from src.core.config import load_config
 from src.core.events import EventBus, UserLoggedIn, EntryAdded
 from src.core.audit_logger import AuditLogger

@@ -145,9 +145,22 @@ def test_memory_wipe_after_clear():
 
     cache.store_key(key)
 
+    assert cache.get_key() == key
+    assert cache.is_unlocked() is True
+
     internal_buffer = cache._cached_key.key
 
     cache.clear()
 
-    assert internal_buffer != bytearray(b"A" * 32)
-    assert all(b == 0 for b in internal_buffer)
+    assert all(byte == 0 for byte in internal_buffer)
+
+    assert cache.get_key() is None
+    assert cache.is_unlocked() is False
+    assert cache._cached_key is None
+    assert cache._protected_memory is None
+    assert cache._unlocked is False
+
+    cache.clear()
+
+    assert cache.get_key() is None
+    assert cache.is_unlocked() is False
