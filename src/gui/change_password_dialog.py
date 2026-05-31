@@ -1,220 +1,137 @@
 from __future__ import annotations
 
-import threading
-import time
 import tkinter as tk
-from tkinter import ttk, messagebox
-
-import customtkinter as ctk
+from tkinter import messagebox, ttk
 
 
-class ChangePasswordDialog(ctk.CTkToplevel):
-    def __init__(self, master, auth_service):
-        super().__init__(master)
+class ChangePasswordDialog(tk.Toplevel):
+    def __init__(self, parent, auth_service):
+        super().__init__(parent)
 
+        self.parent = parent
         self.auth_service = auth_service
 
-        self.title("Смена мастер-пароля")
-        self.geometry("500x420")
+        self.title("Сменить мастер-пароль")
+        self.geometry("420x300")
         self.resizable(False, False)
 
-        self.pause_event = threading.Event()
-        self.pause_event.set()
+        self.transient(parent)
+        self.grab_set()
 
-        self.stop_requested = False
-        self.worker_thread = None
+        self.old_password_var = tk.StringVar()
+        self.new_password_var = tk.StringVar()
+        self.repeat_password_var = tk.StringVar()
 
-        self.grid_columnconfigure(0, weight=1)
+        self._build_ui()
 
-        title = ctk.CTkLabel(
-            self,
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        self.after(100, self.old_password_entry.focus_set)
+
+    def _build_ui(self):
+        main_frame = ttk.Frame(self, padding=18)
+        main_frame.pack(fill="both", expand=True)
+
+        ttk.Label(
+            main_frame,
             text="Смена мастер-пароля",
-            font=ctk.CTkFont(size=24, weight="bold"),
-        )
-        title.pack(pady=(20, 15))
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w", pady=(0, 14))
 
-        self.current_entry = ctk.CTkEntry(
-            self,
-            placeholder_text="Текущий пароль",
+        ttk.Label(main_frame, text="Старый мастер-пароль:").pack(anchor="w")
+
+        self.old_password_entry = ttk.Entry(
+            main_frame,
+            textvariable=self.old_password_var,
             show="*",
-            width=320,
         )
-        self.current_entry.pack(pady=10)
+        self.old_password_entry.pack(fill="x", pady=(4, 10))
 
-        self.new_entry = ctk.CTkEntry(
-            self,
-            placeholder_text="Новый пароль",
+        ttk.Label(main_frame, text="Новый мастер-пароль:").pack(anchor="w")
+
+        ttk.Entry(
+            main_frame,
+            textvariable=self.new_password_var,
             show="*",
-            width=320,
-        )
-        self.new_entry.pack(pady=10)
+        ).pack(fill="x", pady=(4, 10))
 
-        self.confirm_entry = ctk.CTkEntry(
-            self,
-            placeholder_text="Подтверждение нового пароля",
+        ttk.Label(main_frame, text="Повторите новый пароль:").pack(anchor="w")
+
+        ttk.Entry(
+            main_frame,
+            textvariable=self.repeat_password_var,
             show="*",
-            width=320,
-        )
-        self.confirm_entry.pack(pady=10)
+        ).pack(fill="x", pady=(4, 14))
 
-        self.status_label = ctk.CTkLabel(
-            self,
-            text="",
-            font=ctk.CTkFont(size=14),
-        )
-        self.status_label.pack(pady=(10, 5))
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill="x")
 
-        self.progress = ttk.Progressbar(
-            self,
-            orient="horizontal",
-            mode="determinate",
-            length=320,
-            maximum=100,
-        )
-        self.progress.pack(pady=10)
+        ttk.Button(
+            button_frame,
+            text="Сохранить",
+            command=self.save,
+        ).pack(side="right")
 
-        buttons_frame = ctk.CTkFrame(self, fg_color="transparent")
-        buttons_frame.pack(pady=15)
+        ttk.Button(
+            button_frame,
+            text="Отмена",
+            command=self.destroy,
+        ).pack(side="right", padx=(0, 8))
 
-        self.start_button = ctk.CTkButton(
-            buttons_frame,
-            text="Начать",
-            command=self.start_change_password,
-            width=110,
-        )
-        self.start_button.grid(row=0, column=0, padx=5)
+    def save(self):
+        old_password = self.old_password_var.get()
+        new_password = self.new_password_var.get()
+        repeat_password = self.repeat_password_var.get()
 
-        self.pause_button = ctk.CTkButton(
-            buttons_frame,
-            text="Пауза",
-            command=self.pause_process,
-            width=110,
-        )
-        self.pause_button.grid(row=0, column=1, padx=5)
-
-        self.resume_button = ctk.CTkButton(
-            buttons_frame,
-            text="Продолжить",
-            command=self.resume_process,
-            width=110,
-        )
-        self.resume_button.grid(row=0, column=2, padx=5)
-
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-
-    def start_change_password(self):
-        current_password = self.current_entry.get()
-        new_password = self.new_entry.get()
-        confirm_password = self.confirm_entry.get()
-
-        if new_password != confirm_password:
-            messagebox.showerror("Ошибка", "Пароли не совпадают")
+        if not old_password:
+            messagebox.showwarning(
+                "Проверка данных",
+                "Введите старый мастер-пароль.",
+                parent=self,
+            )
             return
 
-        self.start_button.configure(state="disabled")
-        self.stop_requested = False
+        if not new_password:
+            messagebox.showwarning(
+                "Проверка данных",
+                "Введите новый мастер-пароль.",
+                parent=self,
+            )
+            return
 
-        self.worker_thread = threading.Thread(
-            target=self.change_password_worker,
-            args=(current_password, new_password),
-            daemon=True,
-        )
-        self.worker_thread.start()
+        if len(new_password) < 8:
+            messagebox.showwarning(
+                "Проверка данных",
+                "Новый мастер-пароль должен содержать минимум 8 символов.",
+                parent=self,
+            )
+            return
 
-    def change_password_worker(self, current_password: str, new_password: str):
+        if new_password != repeat_password:
+            messagebox.showwarning(
+                "Проверка данных",
+                "Новые мастер-пароли не совпадают.",
+                parent=self,
+            )
+            return
+
         try:
-            self.set_status("Проверка пароля...")
-
-            for i in range(0, 21, 5):
-                if self.stop_requested:
-                    return
-
-                self.pause_event.wait()
-                self.set_progress(i)
-                time.sleep(0.15)
-
-            self.set_status("Формирование новых ключей...")
-
-            for i in range(25, 46, 5):
-                if self.stop_requested:
-                    return
-
-                self.pause_event.wait()
-                self.set_progress(i)
-                time.sleep(0.15)
-
-            self.set_status("Перешифрование хранилища...")
-
-            for i in range(50, 91, 5):
-                if self.stop_requested:
-                    return
-
-                self.pause_event.wait()
-                self.set_progress(i)
-                time.sleep(0.2)
-
-            result = self.auth_service.change_master_password(
-                current_password,
-                new_password,
+            self.auth_service.change_master_password(
+                old_password=old_password,
+                new_password=new_password,
             )
-
-            if not result.success:
-                self.after(
-                    0,
-                    lambda: messagebox.showerror(
-                        "Ошибка",
-                        "\n".join(result.errors),
-                    ),
-                )
-
-                self.after(
-                    0,
-                    lambda: self.start_button.configure(state="normal"),
-                )
-
-                return
-
-            self.set_progress(100)
-            self.set_status("Смена пароля завершена")
-
-            self.after(
-                0,
-                lambda: messagebox.showinfo(
-                    "Успех",
-                    "Мастер-пароль успешно изменён",
-                ),
+        except Exception as exc:
+            messagebox.showerror(
+                "Ошибка",
+                str(exc),
+                parent=self,
             )
+            return
 
-        except Exception as e:
-            self.after(
-                0,
-                lambda: messagebox.showerror(
-                    "Ошибка",
-                    str(e),
-                ),
-            )
+        messagebox.showinfo(
+            "Готово",
+            "Мастер-пароль изменён.",
+            parent=self,
+        )
 
-        finally:
-            self.after(
-                0,
-                lambda: self.start_button.configure(state="normal"),
-            )
-
-    def pause_process(self):
-        self.pause_event.clear()
-        self.set_status("Процесс приостановлен")
-
-    def resume_process(self):
-        self.pause_event.set()
-        self.set_status("Процесс продолжен")
-
-    def set_progress(self, value: int):
-        self.after(0, lambda: self.progress.configure(value=value))
-
-    def set_status(self, text: str):
-        self.after(0, lambda: self.status_label.configure(text=text))
-
-    def on_close(self):
-        self.stop_requested = True
-        self.pause_event.set()
         self.destroy()

@@ -2,73 +2,84 @@ from __future__ import annotations
 
 import secrets
 import string
-from collections import deque
+
+
+class PasswordGeneratorError(Exception):
+    """Базовая ошибка генератора паролей."""
 
 
 class PasswordGenerator:
-    UPPER = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    LOWER = "abcdefghijklmnopqrstuvwxyz"
-    DIGITS = "0123456789"
-    SPECIAL = "!@#$%^&*"
-    AMBIGUOUS = set("lI10O")
+    DEFAULT_LENGTH = 16
+    MIN_LENGTH = 8
+    MAX_LENGTH = 64
 
-    def __init__(self) -> None:
-        self.history = deque(maxlen=20)
+    LOWERCASE = string.ascii_lowercase
+    UPPERCASE = string.ascii_uppercase
+    DIGITS = string.digits
+    SPECIAL_CHARS = "!@#$%^&*"
+
+    SIMILAR_CHARS = set("lI10O")
 
     def generate(
         self,
-        length: int = 16,
-        use_upper: bool = True,
-        use_lower: bool = True,
+        length: int = DEFAULT_LENGTH,
+        use_lowercase: bool = True,
+        use_uppercase: bool = True,
         use_digits: bool = True,
         use_special: bool = True,
-        exclude_ambiguous: bool = False,
+        exclude_similar: bool = False,
     ) -> str:
-        if length < 8 or length > 64:
-            raise ValueError("Длина пароля должна быть от 8 до 64 символов")
+        if length < self.MIN_LENGTH:
+            raise PasswordGeneratorError(
+                f"Минимальная длина пароля: {self.MIN_LENGTH}."
+            )
 
-        sets = []
+        if length > self.MAX_LENGTH:
+            raise PasswordGeneratorError(
+                f"Максимальная длина пароля: {self.MAX_LENGTH}."
+            )
 
-        if use_upper:
-            sets.append(self._filter(self.UPPER, exclude_ambiguous))
-        if use_lower:
-            sets.append(self._filter(self.LOWER, exclude_ambiguous))
+        groups = []
+
+        if use_lowercase:
+            groups.append(self.LOWERCASE)
+
+        if use_uppercase:
+            groups.append(self.UPPERCASE)
+
         if use_digits:
-            sets.append(self._filter(self.DIGITS, exclude_ambiguous))
+            groups.append(self.DIGITS)
+
         if use_special:
-            sets.append(self._filter(self.SPECIAL, exclude_ambiguous))
+            groups.append(self.SPECIAL_CHARS)
 
-        if not sets:
-            raise ValueError("Должен быть выбран хотя бы один набор символов")
+        if not groups:
+            raise PasswordGeneratorError(
+                "Нужно выбрать хотя бы один набор символов."
+            )
 
-        if length < len(sets):
-            raise ValueError("Длина слишком мала для выбранных наборов")
+        if exclude_similar:
+            groups = [
+                "".join(ch for ch in group if ch not in self.SIMILAR_CHARS)
+                for group in groups
+            ]
 
-        for _ in range(100):
-            password_chars = [secrets.choice(charset) for charset in sets]
+        alphabet = "".join(groups)
 
-            all_chars = "".join(sets)
+        if not alphabet:
+            raise PasswordGeneratorError(
+                "После исключения похожих символов набор символов пуст."
+            )
 
-            while len(password_chars) < length:
-                password_chars.append(secrets.choice(all_chars))
+        password_chars = []
 
-            self._secure_shuffle(password_chars)
+        for group in groups:
+            if group:
+                password_chars.append(secrets.choice(group))
 
-            password = "".join(password_chars)
+        while len(password_chars) < length:
+            password_chars.append(secrets.choice(alphabet))
 
-            if password not in self.history:
-                self.history.append(password)
-                return password
+        secrets.SystemRandom().shuffle(password_chars)
 
-        raise ValueError("Не удалось сгенерировать уникальный пароль")
-
-    def _filter(self, charset: str, exclude_ambiguous: bool) -> str:
-        if not exclude_ambiguous:
-            return charset
-
-        return "".join(ch for ch in charset if ch not in self.AMBIGUOUS)
-
-    def _secure_shuffle(self, chars: list[str]) -> None:
-        for i in range(len(chars) - 1, 0, -1):
-            j = secrets.randbelow(i + 1)
-            chars[i], chars[j] = chars[j], chars[i]
+        return "".join(password_chars)

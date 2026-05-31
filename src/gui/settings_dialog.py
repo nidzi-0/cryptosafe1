@@ -1,34 +1,46 @@
+from __future__ import annotations
+
 import tkinter as tk
 from tkinter import ttk
 
 
 class SettingsDialog(tk.Toplevel):
-    def __init__(self, master):
-        super().__init__(master)
+    def __init__(self, parent):
+        super().__init__(parent)
 
         self.title("Настройки")
-        self.geometry("400x300")
+        self.geometry("380x220")
         self.resizable(False, False)
 
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        self.transient(parent)
+        self.grab_set()
 
-        security_tab = ttk.Frame(notebook)
-        notebook.add(security_tab, text="Безопасность")
+        self._build_ui()
 
-        ttk.Label(security_tab, text="Таймер очистки буфера обмена: заглушка").pack(pady=10)
-        ttk.Label(security_tab, text="Автоблокировка: заглушка").pack(pady=10)
+    def _build_ui(self):
+        main_frame = ttk.Frame(self, padding=18)
+        main_frame.pack(fill="both", expand=True)
 
-        appearance_tab = ttk.Frame(notebook)
-        notebook.add(appearance_tab, text="Внешний вид")
+        ttk.Label(
+            main_frame,
+            text="Настройки CryptoSafe Manager",
+            font=("Segoe UI", 13, "bold"),
+        ).pack(anchor="w", pady=(0, 12))
 
-        ttk.Label(appearance_tab, text="Тема оформления: заглушка").pack(pady=10)
-        ttk.Label(appearance_tab, text="Язык интерфейса: заглушка").pack(pady=10)
+        ttk.Label(
+            main_frame,
+            text=(
+                "В Sprint 3 окно настроек является заготовкой.\n"
+                "В следующих спринтах сюда можно добавить:\n"
+                "- автозакрытие хранилища;\n"
+                "- параметры генерации паролей;\n"
+                "- настройки резервного копирования."
+            ),
+            justify="left",
+        ).pack(anchor="w", pady=(0, 18))
 
-        advanced_tab = ttk.Frame(notebook)
-        notebook.add(advanced_tab, text="Дополнительно")
-
-        ttk.Label(advanced_tab, text="Резервное копирование: заглушка").pack(pady=10)
-        ttk.Label(advanced_tab, text="Экспорт данных: заглушка").pack(pady=10)
-
-        ttk.Button(self, text="Закрыть", command=self.destroy).pack(pady=10)
+        ttk.Button(
+            main_frame,
+            text="Закрыть",
+            command=self.destroy,
+        ).pack(anchor="e")

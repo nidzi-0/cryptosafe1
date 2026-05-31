@@ -1,222 +1,348 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+class EntryManagerError(Exception):
+    """Базовая ошибка менеджера записей."""
+
+
+class EntryNotFoundError(EntryManagerError):
+    """Ошибка, если запись не найдена."""
+
+
+class EntryValidationError(EntryManagerError):
+    """Ошибка проверки данных записи."""
 
 
 class EntryManager:
-    def __init__(self, db, encryption_service, event_bus=None) -> None:
-        self.db = db
+    REQUIRED_FIELDS = ("title", "password")
+
+    ENCRYPTED_FIELDS = (
+        "title",
+        "username",
+        "password",
+        "url",
+        "notes",
+        "category",
+        "tags",
+    )
+
+    def __init__(self, db_path: str | Path, encryption_service):
+        self.db_path = Path(db_path)
         self.encryption_service = encryption_service
-        self.event_bus = event_bus
-        self._ensure_schema()
 
-    def _ensure_schema(self) -> None:
-        conn = self.db.connect()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_table_exists()
 
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS vault_entries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                encrypted_data BLOB NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                tags TEXT
-            )
-            """
-        )
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
 
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS deleted_entries (
-                id INTEGER PRIMARY KEY,
-                encrypted_data BLOB NOT NULL,
-                deleted_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                tags TEXT
-            )
-            """
-        )
+    def _now(self) -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_vault_created_at ON vault_entries(created_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_vault_updated_at ON vault_entries(updated_at)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_vault_tags ON vault_entries(tags)")
-
-        conn.commit()
-
-    def create_entry(self, data_dict: dict) -> dict:
-        self._validate(data_dict)
-
-        conn = self.db.connect()
-        now = utc_now()
-
-        payload = dict(data_dict)
-        payload["created_at"] = now
-        payload["version"] = 1
-
-        encrypted = self.encryption_service.encrypt_entry(payload)
-        tags = data_dict.get("tags", "")
-
-        try:
-            conn.execute("BEGIN")
-
-            cur = conn.execute(
+    def _ensure_table_exists(self) -> None:
+        with self._connect() as conn:
+            conn.execute(
                 """
-                INSERT INTO vault_entries(encrypted_data, created_at, updated_at, tags)
-                VALUES (?, ?, ?, ?)
-                """,
-                (encrypted, now, now, tags),
+                CREATE TABLE IF NOT EXISTS vault_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                    title_encrypted BLOB NOT NULL,
+                    username_encrypted BLOB,
+                    password_encrypted BLOB NOT NULL,
+                    url_encrypted BLOB,
+                    notes_encrypted BLOB,
+                    category_encrypted BLOB,
+                    tags_encrypted BLOB,
+
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    deleted_at TEXT
+                )
+                """
             )
-
-            entry_id = int(cur.lastrowid)
-
             conn.commit()
 
-        except Exception:
-            conn.rollback()
-            raise ValueError("Не удалось создать запись")
+    def _encrypt_text(self, value: Any) -> bytes:
+        if value is None:
+            value = ""
 
-        self._publish("EntryCreated", entry_id)
+        text = str(value)
 
-        return self.get_entry(entry_id)
+        encrypted = self.encryption_service.encrypt(text)
 
-    def get_entry(self, entry_id: int) -> dict:
-        conn = self.db.connect()
+        if isinstance(encrypted, str):
+            return encrypted.encode("utf-8")
 
-        row = conn.execute(
-            """
-            SELECT id, encrypted_data, created_at, updated_at, tags
-            FROM vault_entries
-            WHERE id = ?
-            """,
-            (entry_id,),
-        ).fetchone()
+        return encrypted
+
+    def _decrypt_text(self, value: bytes | None) -> str:
+        if value is None:
+            return ""
+
+        decrypted = self.encryption_service.decrypt(value)
+
+        if isinstance(decrypted, bytes):
+            return decrypted.decode("utf-8")
+
+        return str(decrypted)
+
+    def _validate_entry_data(self, data: dict[str, Any]) -> None:
+        if not isinstance(data, dict):
+            raise EntryValidationError("Данные записи должны быть словарём.")
+
+        title = str(data.get("title", "")).strip()
+        password = str(data.get("password", ""))
+
+        if not title:
+            raise EntryValidationError("Название записи не может быть пустым.")
+
+        if not password:
+            raise EntryValidationError("Пароль не может быть пустым.")
+
+    def _row_to_entry(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "title": self._decrypt_text(row["title_encrypted"]),
+            "username": self._decrypt_text(row["username_encrypted"]),
+            "password": self._decrypt_text(row["password_encrypted"]),
+            "url": self._decrypt_text(row["url_encrypted"]),
+            "notes": self._decrypt_text(row["notes_encrypted"]),
+            "category": self._decrypt_text(row["category_encrypted"]),
+            "tags": self._decrypt_text(row["tags_encrypted"]),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "deleted_at": row["deleted_at"],
+        }
+
+    def create_entry(self, data: dict[str, Any]) -> int:
+        self._validate_entry_data(data)
+
+        now = self._now()
+
+        encrypted = {
+            field: self._encrypt_text(data.get(field, ""))
+            for field in self.ENCRYPTED_FIELDS
+        }
+
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO vault_entries (
+                    title_encrypted,
+                    username_encrypted,
+                    password_encrypted,
+                    url_encrypted,
+                    notes_encrypted,
+                    category_encrypted,
+                    tags_encrypted,
+                    created_at,
+                    updated_at,
+                    deleted_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    encrypted["title"],
+                    encrypted["username"],
+                    encrypted["password"],
+                    encrypted["url"],
+                    encrypted["notes"],
+                    encrypted["category"],
+                    encrypted["tags"],
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+
+            entry_id = int(cursor.lastrowid)
+
+        self._write_audit_log("create_entry", f"Создана запись id={entry_id}")
+
+        return entry_id
+
+    def get_entry(self, entry_id: int) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM vault_entries
+                WHERE id = ?
+                  AND deleted_at IS NULL
+                """,
+                (entry_id,),
+            ).fetchone()
 
         if row is None:
-            raise ValueError("Запись недоступна")
+            raise EntryNotFoundError(f"Запись с id={entry_id} не найдена.")
 
-        data = self.encryption_service.decrypt_entry(row["encrypted_data"])
-        data["id"] = row["id"]
-        data["created_at"] = row["created_at"]
-        data["updated_at"] = row["updated_at"]
-        data["tags"] = row["tags"]
+        return self._row_to_entry(row)
 
-        return data
+    def get_all_entries(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM vault_entries
+                WHERE deleted_at IS NULL
+                ORDER BY updated_at DESC, id DESC
+                """
+            ).fetchall()
 
-    def get_all_entries(self) -> list[dict]:
-        conn = self.db.connect()
+        return [self._row_to_entry(row) for row in rows]
 
-        rows = conn.execute(
-            """
-            SELECT id
-            FROM vault_entries
-            ORDER BY updated_at DESC
-            """
-        ).fetchall()
+    def update_entry(self, entry_id: int, data: dict[str, Any]) -> None:
+        self._validate_entry_data(data)
 
-        return [self.get_entry(row["id"]) for row in rows]
+        self.get_entry(entry_id)
 
-    def update_entry(self, entry_id: int, data_dict: dict) -> dict:
-        self._validate(data_dict)
+        now = self._now()
 
-        conn = self.db.connect()
-        now = utc_now()
+        encrypted = {
+            field: self._encrypt_text(data.get(field, ""))
+            for field in self.ENCRYPTED_FIELDS
+        }
 
-        current = self.get_entry(entry_id)
-
-        payload = dict(data_dict)
-        payload["created_at"] = current.get("created_at")
-        payload["version"] = 1
-
-        encrypted = self.encryption_service.encrypt_entry(payload)
-        tags = data_dict.get("tags", "")
-
-        try:
-            conn.execute("BEGIN")
-
-            cur = conn.execute(
+        with self._connect() as conn:
+            conn.execute(
                 """
                 UPDATE vault_entries
-                SET encrypted_data = ?, updated_at = ?, tags = ?
+                SET
+                    title_encrypted = ?,
+                    username_encrypted = ?,
+                    password_encrypted = ?,
+                    url_encrypted = ?,
+                    notes_encrypted = ?,
+                    category_encrypted = ?,
+                    tags_encrypted = ?,
+                    updated_at = ?
                 WHERE id = ?
+                  AND deleted_at IS NULL
                 """,
-                (encrypted, now, tags, entry_id),
+                (
+                    encrypted["title"],
+                    encrypted["username"],
+                    encrypted["password"],
+                    encrypted["url"],
+                    encrypted["notes"],
+                    encrypted["category"],
+                    encrypted["tags"],
+                    now,
+                    entry_id,
+                ),
             )
+            conn.commit()
 
-            if cur.rowcount == 0:
-                raise ValueError("Запись недоступна")
+        self._write_audit_log("update_entry", f"Обновлена запись id={entry_id}")
+
+    def delete_entry(self, entry_id: int, soft_delete: bool = True) -> None:
+        self.get_entry(entry_id)
+
+        now = self._now()
+
+        with self._connect() as conn:
+            if soft_delete:
+                conn.execute(
+                    """
+                    UPDATE vault_entries
+                    SET deleted_at = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                      AND deleted_at IS NULL
+                    """,
+                    (
+                        now,
+                        now,
+                        entry_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    DELETE FROM vault_entries
+                    WHERE id = ?
+                    """,
+                    (entry_id,),
+                )
 
             conn.commit()
 
-        except Exception:
-            conn.rollback()
-            raise ValueError("Не удалось обновить запись")
+        self._write_audit_log("delete_entry", f"Удалена запись id={entry_id}")
 
-        self._publish("EntryUpdated", entry_id)
+    def search_entries(self, query: str) -> list[dict[str, Any]]:
+        query = query.strip().lower()
 
-        return self.get_entry(entry_id)
+        if not query:
+            return self.get_all_entries()
 
-    def delete_entry(self, entry_id: int, soft_delete: bool = True) -> None:
-        conn = self.db.connect()
+        result = []
 
-        row = conn.execute(
-            """
-            SELECT id, encrypted_data, tags
-            FROM vault_entries
-            WHERE id = ?
-            """,
-            (entry_id,),
-        ).fetchone()
+        for entry in self.get_all_entries():
+            text = " ".join(
+                [
+                    str(entry.get("title", "")),
+                    str(entry.get("username", "")),
+                    str(entry.get("url", "")),
+                    str(entry.get("notes", "")),
+                    str(entry.get("category", "")),
+                    str(entry.get("tags", "")),
+                ]
+            ).lower()
 
-        if row is None:
-            raise ValueError("Запись недоступна")
+            if query in text:
+                result.append(entry)
 
+        return result
+
+    def count_entries(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM vault_entries
+                WHERE deleted_at IS NULL
+                """
+            ).fetchone()
+
+        return int(row["count"])
+
+    def _write_audit_log(self, action: str, details: str = "") -> None:
         try:
-            conn.execute("BEGIN")
-
-            if soft_delete:
-                deleted_at = utc_now()
-                expires_at = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS audit_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        action TEXT NOT NULL,
+                        details TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                    """
+                )
 
                 conn.execute(
                     """
-                    INSERT INTO deleted_entries(id, encrypted_data, deleted_at, expires_at, tags)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO audit_log (
+                        action,
+                        details,
+                        created_at
+                    )
+                    VALUES (?, ?, ?)
                     """,
-                    (row["id"], row["encrypted_data"], deleted_at, expires_at, row["tags"]),
+                    (
+                        action,
+                        details,
+                        self._now(),
+                    ),
                 )
 
-            conn.execute(
-                """
-                DELETE FROM vault_entries
-                WHERE id = ?
-                """,
-                (entry_id,),
-            )
-
-            conn.commit()
-
+                conn.commit()
         except Exception:
-            conn.rollback()
-            raise ValueError("Не удалось удалить запись")
-
-        self._publish("EntryDeleted", entry_id)
-
-    def _validate(self, data: dict) -> None:
-        if not data.get("title"):
-            raise ValueError("Заголовок обязателен")
-
-        if not data.get("password"):
-            raise ValueError("Пароль обязателен")
-
-    def _publish(self, event_name: str, entry_id: int) -> None:
-        if self.event_bus is None:
-            return
-
-        try:
-            self.event_bus.publish(event_name, {"entry_id": entry_id})
-        except TypeError:
             pass

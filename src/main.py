@@ -1,199 +1,157 @@
 from __future__ import annotations
 
+import sys
+import traceback
 from pathlib import Path
-from tkinter import filedialog, messagebox
-from src.core.config import load_config
-from src.core.events import EventBus, UserLoggedIn, EntryAdded
-from src.core.audit_logger import AuditLogger
-from src.core.state_manager import StateManager
+from tkinter import messagebox
+
 from src.core.crypto.auth_service import AuthService
-from src.core.crypto.placeholder import AES256Placeholder
-from src.database.db import Database
-from src.database.repo import VaultRepository, VaultEntryInput
-from src.database.settings_repo import SettingsRepository
-from src.database.key_store_repo import KeyStoreRepository
+from src.core.vault.encryption_service import AESGCMEncryptionService
+from src.core.vault.entry_manager import EntryManager
 from src.gui.main_window import MainWindow
 from src.gui.setup_wizard import SetupWizard
-from src.gui.login_dialog import LoginDialog
 
 
-def show_centered(window, width: int = 450, height: int = 340) -> None:
-    window.update_idletasks()
-    window.geometry(f"{width}x{height}+300+200")
-    window.deiconify()
-    window.lift()
-    window.focus_force()
-    window.attributes("-topmost", True)
-    window.after(500, lambda: window.attributes("-topmost", False))
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+DB_PATH = DATA_DIR / "cryptosafe_dev.db"
 
 
-def choose_existing_or_new_db(default_path: Path) -> Path | None:
-    answer = messagebox.askyesnocancel(
-        "База данных",
-        "Открыть существующую базу данных?\n\n"
-        "Да — открыть существующую.\n"
-        "Нет — создать новую.\n"
-        "Отмена — выйти.",
+def ensure_data_dir() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def show_fatal_error(title: str, exc: Exception) -> None:
+    error_text = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
     )
 
-    if answer is None:
+    print(error_text, file=sys.stderr)
+
+    messagebox.showerror(
+        title,
+        f"{exc}\n\nПодробности ошибки выведены в консоль.",
+    )
+
+
+def get_master_key_from_dialog_result(result) -> bytes | None:
+    if result is None:
         return None
 
-    if answer is True:
-        path = filedialog.askopenfilename(
-            title="Открыть базу данных CryptoSafe",
-            filetypes=[("База данных SQLite", "*.db")],
+    if isinstance(result, bytes):
+        return result
+
+    if isinstance(result, dict):
+        master_key = result.get("master_key")
+
+        if isinstance(master_key, bytes):
+            return master_key
+
+    return None
+
+
+def get_auth_service_from_dialog_result(result) -> AuthService | None:
+    if isinstance(result, dict):
+        auth_service = result.get("auth_service")
+
+        if isinstance(auth_service, AuthService):
+            return auth_service
+
+    return None
+
+
+def run_auth_dialog(root: MainWindow) -> tuple[bytes | None, AuthService | None]:
+    print("[INFO] Открываю окно входа / регистрации...")
+
+    dialog = SetupWizard(root)
+
+    # Ждём, пока пользователь создаст пароль, войдёт или отменит вход.
+    root.wait_window(dialog)
+
+    print("[INFO] Окно входа / регистрации закрыто.")
+
+    result = getattr(dialog, "result", None)
+
+    if result is None:
+        print("[INFO] Пользователь отменил вход.")
+        return None, None
+
+    master_key = get_master_key_from_dialog_result(result)
+    auth_service = get_auth_service_from_dialog_result(result)
+
+    if master_key is None:
+        raise RuntimeError(
+            "SetupWizard завершился, но не вернул master_key. "
+            "Проверь, что self.result содержит {'master_key': master_key}."
         )
-        if not path:
-            return None
-        return Path(path)
 
-    path = filedialog.asksaveasfilename(
-        title="Создать базу данных CryptoSafe",
-        defaultextension=".db",
-        initialfile=default_path.name,
-        filetypes=[("База данных SQLite", "*.db")],
-    )
-    if not path:
-        return None
-
-    return Path(path)
-
-
-def create_demo_entry_once(repo: VaultRepository, bus: EventBus) -> None:
-    new_id = repo.add_entry(
-        VaultEntryInput(
-            title="Демонстрационная запись",
-            username="пользователь",
-            password="демо_пароль",
-            url="https://example.com",
-            notes="демонстрационные заметки",
-            tags="демо",
+    if auth_service is None:
+        raise RuntimeError(
+            "SetupWizard завершился, но не вернул auth_service. "
+            "Проверь, что self.result содержит {'auth_service': auth_service}."
         )
+
+    return master_key, auth_service
+
+
+def connect_vault_services(
+    root: MainWindow,
+    auth_service: AuthService,
+    master_key: bytes,
+) -> None:
+    print("[INFO] Создаю AESGCMEncryptionService...")
+
+    encryption_service = AESGCMEncryptionService(master_key)
+
+    print("[INFO] Создаю EntryManager...")
+
+    entry_manager = EntryManager(
+        db_path=DB_PATH,
+        encryption_service=encryption_service,
     )
-    bus.publish(EntryAdded(entry_id=new_id, title="Демонстрационная запись"))
+
+    print("[INFO] Подключаю сервисы к главному окну...")
+
+    root.set_auth_service(auth_service)
+    root.set_entry_manager(entry_manager)
 
 
 def main() -> None:
-    cfg = load_config()
+    ensure_data_dir()
 
-    app = MainWindow()
+    print("[INFO] CryptoSafe Manager запускается...")
+    print(f"[INFO] BASE_DIR = {BASE_DIR}")
+    print(f"[INFO] DB_PATH = {DB_PATH}")
 
-    db_path = choose_existing_or_new_db(cfg.db_path)
-    if db_path is None:
-        app.destroy()
-        return
+    root = MainWindow()
 
-    db = Database(db_path)
-    db.init_schema()
-
-    key_store = KeyStoreRepository(db)
-    bus = EventBus()
-    audit = AuditLogger(db)
-
-    bus.subscribe(UserLoggedIn, audit.on_login)
-    bus.subscribe(EntryAdded, audit.on_entry_added)
-
-    auth_service = AuthService(key_store, bus)
-
-    if not auth_service.is_configured():
-        wizard = SetupWizard(app)
-        wizard.db_var.set(str(db_path))
-        show_centered(wizard)
-
-        app.wait_window(wizard)
-
-        if wizard.result is None:
-            app.destroy()
-            return
-
-        setup_result = auth_service.setup_master_password(wizard.result.master_password)
-
-        if not setup_result.success:
-            messagebox.showerror(
-                "Ошибка мастер-пароля",
-                "\n".join(setup_result.errors),
-            )
-            app.destroy()
-            return
-
-        login_result = auth_service.login(wizard.result.master_password)
-
-        if not login_result.success:
-            messagebox.showerror("Ошибка входа", login_result.message)
-            app.destroy()
-            return
-
-    else:
-        login_dialog = LoginDialog(app)
-        show_centered(login_dialog, 420, 210)
-
-        app.wait_window(login_dialog)
-
-        if login_dialog.result is None:
-            app.destroy()
-            return
-
-        login_result = auth_service.login(login_dialog.result.master_password)
-
-        if not login_result.success:
-            messagebox.showerror("Ошибка входа", login_result.message)
-            app.destroy()
-            return
-
-    encryption_key = auth_service.get_encryption_key()
-
-    if encryption_key is None:
-        messagebox.showerror("Ошибка", "Ключ шифрования не был получен.")
-        app.destroy()
-        return
-
-    crypto = AES256Placeholder(auth_service)
-
-    settings_repo = SettingsRepository(db, crypto)
-    settings_repo.set_setting("clipboard_timeout_sec", str(cfg.clipboard_timeout_sec), encrypted=False)
-    settings_repo.set_setting("auto_lock_idle_sec", str(cfg.auto_lock_idle_sec), encrypted=False)
-    settings_repo.set_setting("theme", "light", encrypted=False)
-    settings_repo.set_setting("language", "ru", encrypted=False)
-    settings_repo.set_setting("argon2_time_cost", "3", encrypted=False)
-    settings_repo.set_setting("argon2_memory_cost", "65536", encrypted=False)
-    settings_repo.set_setting("argon2_parallelism", "4", encrypted=False)
-    settings_repo.set_setting("pbkdf2_iterations", "100000", encrypted=False)
-
-    state = StateManager()
-    state.set_unlocked(True)
-
-    bus = EventBus()
-    audit = AuditLogger(db)
-
-    bus.subscribe(UserLoggedIn, audit.on_login)
-    bus.subscribe(EntryAdded, audit.on_entry_added)
-
-    bus.publish(UserLoggedIn(user="локально"))
-
-    repo = VaultRepository(db, crypto)
+    # Главное окно скрываем до успешного входа.
+    root.withdraw()
 
     try:
-        create_demo_entry_once(repo, bus)
-    except Exception:
-        pass
-    app.set_auth_service(auth_service)
-    app.status_var.set(
-        f"Статус: разблокировано | Таймер буфера обмена: {cfg.clipboard_timeout_sec} c"
-    )
-    def on_window_focus_out(event=None):
-        auth_service.auth_manager.on_focus_lost()
-        app.status_var.set("Статус: заблокировано | Ключ очищен из памяти")
+        master_key, auth_service = run_auth_dialog(root)
 
-    def on_window_minimized(event=None):
-        if app.state() == "iconic":
-            auth_service.auth_manager.on_window_minimized()
-            app.status_var.set("Статус: заблокировано | Приложение свернуто, ключ очищен")
+        if master_key is None or auth_service is None:
+            print("[INFO] Вход отменён. Приложение закрывается.")
+            root.destroy()
+            return
 
-    app.bind("<FocusOut>", on_window_focus_out)
-    app.bind("<Unmap>", on_window_minimized)
-    app.protocol("WM_DELETE_WINDOW", lambda: (auth_service.logout(), app.destroy()))
-    app.mainloop()
+        connect_vault_services(
+            root=root,
+            auth_service=auth_service,
+            master_key=master_key,
+        )
+
+        print("[INFO] Главное окно запущено.")
+
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+        root.mainloop()
+
+    except Exception as exc:
+        show_fatal_error("Критическая ошибка CryptoSafe Manager", exc)
+        root.destroy()
 
 
 if __name__ == "__main__":

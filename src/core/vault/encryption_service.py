@@ -1,63 +1,113 @@
 from __future__ import annotations
 
-import json
 import os
-from datetime import datetime, timezone
+
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
-class VaultEncryptionService:
-    VERSION = 1
+class VaultEncryptionError(Exception):
+    """Базовая ошибка сервиса шифрования."""
+
+
+class VaultDecryptionError(VaultEncryptionError):
+    """Ошибка расшифровки данных."""
+
+
+class InvalidEncryptionKeyError(VaultEncryptionError):
+    """Ошибка некорректного ключа шифрования."""
+
+
+class AESGCMEncryptionService:
+    """
+    Сервис шифрования AES-256-GCM.
+
+    Формат хранения:
+        nonce + ciphertext
+
+    nonce — 12 байт.
+    ciphertext — зашифрованные данные вместе с authentication tag.
+    """
+
     NONCE_SIZE = 12
+    KEY_SIZE = 32
 
-    def __init__(self, key_manager) -> None:
-        self.key_manager = key_manager
+    def __init__(self, key: bytes):
+        self._validate_key(key)
+        self.key = key
+        self.aesgcm = AESGCM(self.key)
 
-    def _get_key(self) -> bytes:
-        key = self.key_manager.get_encryption_key()
+    def _validate_key(self, key: bytes) -> None:
+        if not isinstance(key, bytes):
+            raise InvalidEncryptionKeyError(
+                "Ключ шифрования должен быть bytes."
+            )
 
-        if key is None:
-            raise ValueError("Хранилище заблокировано")
+        if len(key) != self.KEY_SIZE:
+            raise InvalidEncryptionKeyError(
+                f"Ключ шифрования должен быть длиной {self.KEY_SIZE} байта."
+            )
 
-        if len(key) != 32:
-            raise ValueError("Ключ AES-256 должен быть 32 байта")
+    def encrypt(self, plaintext: str | bytes) -> bytes:
+        if plaintext is None:
+            plaintext = ""
 
-        return key
-
-    def encrypt_entry(self, data: dict) -> bytes:
-        key = self._get_key()
-        aesgcm = AESGCM(key)
+        if isinstance(plaintext, str):
+            plaintext_bytes = plaintext.encode("utf-8")
+        elif isinstance(plaintext, bytes):
+            plaintext_bytes = plaintext
+        else:
+            plaintext_bytes = str(plaintext).encode("utf-8")
 
         nonce = os.urandom(self.NONCE_SIZE)
 
-        payload = {
-            "title": data.get("title", ""),
-            "username": data.get("username", ""),
-            "password": data.get("password", ""),
-            "url": data.get("url", ""),
-            "notes": data.get("notes", ""),
-            "category": data.get("category", ""),
-            "totp_secret": data.get("totp_secret", ""),
-            "share_metadata": data.get("share_metadata", {}),
-            "created_at": data.get("created_at") or datetime.now(timezone.utc).isoformat(),
-            "version": self.VERSION,
-        }
-
-        plaintext = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+        ciphertext = self.aesgcm.encrypt(
+            nonce,
+            plaintext_bytes,
+            None,
+        )
 
         return nonce + ciphertext
 
-    def decrypt_entry(self, encrypted_blob: bytes) -> dict:
-        if not encrypted_blob or len(encrypted_blob) <= self.NONCE_SIZE:
-            raise ValueError("Некорректные зашифрованные данные")
+    def decrypt(self, encrypted_data: bytes) -> str:
+        if encrypted_data is None:
+            return ""
 
-        key = self._get_key()
-        aesgcm = AESGCM(key)
+        if isinstance(encrypted_data, memoryview):
+            encrypted_data = encrypted_data.tobytes()
 
-        nonce = encrypted_blob[:self.NONCE_SIZE]
-        ciphertext = encrypted_blob[self.NONCE_SIZE:]
+        if not isinstance(encrypted_data, bytes):
+            raise VaultDecryptionError(
+                "Зашифрованные данные должны быть bytes."
+            )
 
-        plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+        if len(encrypted_data) <= self.NONCE_SIZE:
+            raise VaultDecryptionError(
+                "Зашифрованные данные повреждены или слишком короткие."
+            )
 
-        return json.loads(plaintext.decode("utf-8"))
+        nonce = encrypted_data[: self.NONCE_SIZE]
+        ciphertext = encrypted_data[self.NONCE_SIZE :]
+
+        try:
+            plaintext = self.aesgcm.decrypt(
+                nonce,
+                ciphertext,
+                None,
+            )
+        except InvalidTag as exc:
+            raise VaultDecryptionError(
+                "Не удалось расшифровать данные. "
+                "Возможно, неверный мастер-пароль или данные повреждены."
+            ) from exc
+        except Exception as exc:
+            raise VaultDecryptionError(
+                f"Ошибка расшифровки данных: {exc}"
+            ) from exc
+
+        try:
+            return plaintext.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise VaultDecryptionError(
+                "Расшифрованные данные имеют неверную кодировку."
+            ) from exc
