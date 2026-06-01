@@ -8,9 +8,15 @@ from difflib import SequenceMatcher
 from tkinter import messagebox, ttk
 from typing import Any
 
-from src.core.security.clipboard_service import (
-    ClipboardIntegrationNotEnabledError,
+from src.core.clipboard.clipboard_monitor import ClipboardMonitor
+from src.core.clipboard.clipboard_service import (
+    ClipboardCleared,
+    ClipboardCopied,
+    ClipboardSecurityAlert,
     ClipboardService,
+    ClipboardSettings,
+    ClipboardStateChanged,
+    ClipboardWarning,
 )
 from src.core.vault.password_generator import PasswordGenerator
 from src.gui.change_password_dialog import ChangePasswordDialog
@@ -59,8 +65,8 @@ class MainWindow(tk.Tk):
         super().__init__()
 
         self.title("CryptoSafe Manager")
-        self.geometry("1080x660")
-        self.minsize(980, 580)
+        self.geometry("1120x700")
+        self.minsize(1000, 600)
 
         self.auth_service = None
         self.entry_manager = None
@@ -70,10 +76,30 @@ class MainWindow(tk.Tk):
         self.displayed_entries: list[dict[str, Any]] = []
 
         self.password_generator = PasswordGenerator()
-        self.clipboard_service = ClipboardService()
+
+        self.clipboard_settings = ClipboardSettings(
+            auto_clear_seconds=30,
+            notifications_enabled=True,
+            warning_before_clear_seconds=5,
+        )
+        self.clipboard_service = ClipboardService(settings=self.clipboard_settings)
+        self.clipboard_service.subscribe(self.on_clipboard_event)
+
+        self.clipboard_monitor = ClipboardMonitor(
+            platform_adapter=self.clipboard_service.platform_adapter,
+            clipboard_service=self.clipboard_service,
+            poll_interval_seconds=1.0,
+        )
+
+        try:
+            self.clipboard_monitor.start()
+        except Exception:
+            pass
 
         self.passwords_visible_var = tk.BooleanVar(value=False)
         self.search_history: deque[str] = deque(maxlen=self.SEARCH_HISTORY_LIMIT)
+
+        self.clipboard_status_var = tk.StringVar(value="Буфер обмена: пусто")
 
         self._build_menu()
         self._build_toolbar()
@@ -83,8 +109,23 @@ class MainWindow(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.secure_close)
 
         self.status_var = tk.StringVar(value="Статус: заблокировано")
-        self.status = ttk.Label(self, textvariable=self.status_var, anchor="w")
-        self.status.pack(fill="x", side="bottom", padx=10, pady=(0, 8))
+        self.status_frame = ttk.Frame(self)
+        self.status_frame.pack(fill="x", side="bottom", padx=10, pady=(0, 8))
+
+        ttk.Label(
+            self.status_frame,
+            textvariable=self.status_var,
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+
+        ttk.Label(
+            self.status_frame,
+            textvariable=self.clipboard_status_var,
+            anchor="e",
+        ).pack(side="right")
+
+        self.after(1000, self.update_clipboard_status_loop)
+
 
     def set_auth_service(self, auth_service):
         self.auth_service = auth_service
@@ -120,6 +161,33 @@ class MainWindow(tk.Tk):
             label="Показать/скрыть пароль выбранной записи",
             command=self.toggle_selected_passwords,
             accelerator="Ctrl+Shift+P",
+        )
+        edit_menu.add_separator()
+        edit_menu.add_command(
+            label="Копировать пароль",
+            command=self.copy_selected_password,
+            accelerator="Ctrl+Shift+C",
+        )
+        edit_menu.add_command(
+            label="Копировать логин",
+            command=self.copy_selected_username,
+        )
+        edit_menu.add_command(
+            label="Копировать всё",
+            command=self.copy_selected_all,
+        )
+        edit_menu.add_command(
+            label="Очистить буфер обмена",
+            command=self.clear_clipboard_manual,
+        )
+        edit_menu.add_separator()
+        edit_menu.add_command(
+            label="Предпросмотр буфера",
+            command=self.show_clipboard_preview,
+        )
+        edit_menu.add_command(
+            label="Показать содержимое буфера",
+            command=self.reveal_clipboard_preview_with_auth,
         )
 
         view_menu = tk.Menu(menubar, tearoff=0)
@@ -178,6 +246,36 @@ class MainWindow(tk.Tk):
             command=self.toggle_selected_passwords,
         ).pack(side="left", padx=(6, 0))
 
+        ttk.Separator(toolbar, orient="vertical").pack(
+            side="left",
+            fill="y",
+            padx=10,
+        )
+
+        ttk.Button(
+            toolbar,
+            text="Копировать пароль",
+            command=self.copy_selected_password,
+        ).pack(side="left")
+
+        ttk.Button(
+            toolbar,
+            text="Копировать логин",
+            command=self.copy_selected_username,
+        ).pack(side="left", padx=(6, 0))
+
+        ttk.Button(
+            toolbar,
+            text="Очистить буфер",
+            command=self.clear_clipboard_manual,
+        ).pack(side="left", padx=(6, 0))
+
+        ttk.Button(
+            toolbar,
+            text="Предпросмотр",
+            command=self.show_clipboard_preview,
+        ).pack(side="left", padx=(6, 0))
+
         ttk.Label(toolbar, text="Поиск:").pack(side="left", padx=(20, 6))
 
         self.search_var = tk.StringVar()
@@ -186,7 +284,7 @@ class MainWindow(tk.Tk):
         self.search_combo = ttk.Combobox(
             toolbar,
             textvariable=self.search_var,
-            width=42,
+            width=36,
             values=[],
         )
         self.search_combo.pack(side="left")
@@ -221,15 +319,407 @@ class MainWindow(tk.Tk):
         )
         self.context_menu.add_separator()
         self.context_menu.add_command(
-            label="Копировать пароль (Sprint 4)",
-            command=self.copy_selected_password_stub,
+            label="Копировать пароль",
+            command=self.copy_selected_password,
+        )
+        self.context_menu.add_command(
+            label="Копировать логин",
+            command=self.copy_selected_username,
+        )
+        self.context_menu.add_command(
+            label="Копировать всё",
+            command=self.copy_selected_all,
+        )
+        self.context_menu.add_command(
+            label="Предпросмотр буфера",
+            command=self.show_clipboard_preview,
+        )
+        self.context_menu.add_command(
+            label="Показать содержимое буфера",
+            command=self.reveal_clipboard_preview_with_auth,
+        )
+        self.context_menu.add_separator()
+        self.context_menu.add_command(
+            label="Очистить буфер обмена",
+            command=self.clear_clipboard_manual,
         )
 
         self.table.tree.bind("<Button-3>", self.show_context_menu)
+        self.table.tree.bind("<Button-1>", self.on_table_left_click)
 
     def _bind_hotkeys(self):
         self.bind_all("<Control-Shift-P>", lambda event: self.toggle_selected_passwords())
         self.bind_all("<Control-Shift-p>", lambda event: self.toggle_selected_passwords())
+
+        self.bind_all("<Control-Shift-C>", lambda event: self.copy_selected_password())
+        self.bind_all("<Control-Shift-c>", lambda event: self.copy_selected_password())
+
+
+    def on_clipboard_event(self, event):
+        if isinstance(event, ClipboardCopied):
+            source_title = self.get_entry_title_by_id(event.source_entry_id)
+
+            self.table.set_clipboard_marker(
+                entry_id=event.source_entry_id,
+                data_type=event.data_type,
+            )
+
+            if self.clipboard_settings.notifications_enabled:
+                self.clipboard_status_var.set(
+                    f"Буфер: скопировано {event.data_type}, "
+                    f"очистка через {event.timeout_seconds} сек."
+                )
+
+                self.show_toast(
+                    "Буфер обмена",
+                    f"Скопировано: {event.data_type}\n"
+                    f"Источник: {source_title or 'запись'}\n"
+                    f"Автоочистка: {event.timeout_seconds} сек.",
+                )
+
+        elif isinstance(event, ClipboardWarning):
+            if self.clipboard_settings.notifications_enabled:
+                self.clipboard_status_var.set("Буфер: скоро будет очищен")
+
+                self.show_toast(
+                    "Предупреждение",
+                    f"Буфер обмена будет очищен через {event.remaining_seconds} сек.",
+                )
+
+        elif isinstance(event, ClipboardCleared):
+            self.table.set_clipboard_marker(None, None)
+
+            if self.clipboard_settings.notifications_enabled:
+                self.clipboard_status_var.set("Буфер обмена: очищен")
+
+                self.show_toast(
+                    "Буфер обмена",
+                    "Буфер обмена очищен.",
+                )
+
+        elif isinstance(event, ClipboardSecurityAlert):
+            messagebox.showwarning(
+                "Безопасность буфера обмена",
+                event.message,
+            )
+
+        elif isinstance(event, ClipboardStateChanged):
+            self.update_clipboard_status()
+
+    def update_clipboard_status_loop(self):
+        self.update_clipboard_status()
+        self.after(1000, self.update_clipboard_status_loop)
+
+    def update_clipboard_status(self):
+        try:
+            status = self.clipboard_service.get_status()
+        except Exception:
+            self.clipboard_status_var.set("Буфер обмена: ошибка")
+            return
+
+        if not status.active:
+            self.clipboard_status_var.set("Буфер обмена: пусто")
+            return
+
+        remaining = int(status.remaining_seconds)
+
+        if status.ephemeral:
+            mode_text = "ephemeral"
+        else:
+            mode_text = "system"
+
+        if remaining > 0:
+            self.clipboard_status_var.set(
+                f"Буфер: {status.data_type}, {mode_text}, "
+                f"осталось {remaining} сек., {status.preview}"
+            )
+        else:
+            self.clipboard_status_var.set(
+                f"Буфер: {status.data_type}, {mode_text}, "
+                f"без автоочистки, {status.preview}"
+            )
+
+    def get_single_selected_entry(self) -> dict[str, Any] | None:
+        if self.entry_manager is None:
+            messagebox.showerror("Ошибка", "Хранилище не подключено.")
+            return None
+
+        selected_ids = self.table.get_selected_ids()
+
+        if not selected_ids:
+            messagebox.showwarning("Выбор записи", "Выберите запись.")
+            return None
+
+        if len(selected_ids) > 1:
+            messagebox.showwarning(
+                "Выбор записи",
+                "Для копирования выберите только одну запись.",
+            )
+            return None
+
+        entry_id = selected_ids[0]
+
+        try:
+            return self.entry_manager.get_entry(entry_id)
+        except Exception:
+            messagebox.showerror(
+                "Ошибка",
+                "Не удалось открыть выбранную запись.",
+            )
+            return None
+
+    def get_single_entry_by_id(self, entry_id: int) -> dict[str, Any] | None:
+        if self.entry_manager is None:
+            messagebox.showerror("Ошибка", "Хранилище не подключено.")
+            return None
+
+        try:
+            return self.entry_manager.get_entry(entry_id)
+        except Exception:
+            messagebox.showerror(
+                "Ошибка",
+                "Не удалось открыть выбранную запись.",
+            )
+            return None
+
+    def is_vault_unlocked(self) -> bool:
+        if self.key_manager is None:
+            return True
+
+        if hasattr(self.key_manager, "is_unlocked"):
+            try:
+                return bool(self.key_manager.is_unlocked())
+            except Exception:
+                return True
+
+        return True
+
+    def copy_entry_field_to_clipboard(
+        self,
+        entry: dict[str, Any],
+        field_name: str,
+        data_type: str,
+    ) -> None:
+        data = str(entry.get(field_name, ""))
+
+        try:
+            if self.entry_manager is not None and hasattr(
+                self.entry_manager,
+                "request_clipboard_copy",
+            ):
+                self.entry_manager.request_clipboard_copy(
+                    entry["id"],
+                    field_name,
+                )
+
+            self.clipboard_service.copy_to_clipboard(
+                data=data,
+                data_type=data_type,
+                source_entry_id=entry.get("id"),
+                vault_unlocked=self.is_vault_unlocked(),
+                never_copy=bool(entry.get("never_copy_to_clipboard", False)),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Буфер обмена",
+                str(exc),
+            )
+
+    def copy_selected_password(self):
+        entry = self.get_single_selected_entry()
+
+        if entry is None:
+            return
+
+        self.copy_entry_field_to_clipboard(
+            entry=entry,
+            field_name="password",
+            data_type="password",
+        )
+
+    def copy_selected_username(self):
+        entry = self.get_single_selected_entry()
+
+        if entry is None:
+            return
+
+        self.copy_entry_field_to_clipboard(
+            entry=entry,
+            field_name="username",
+            data_type="username",
+        )
+
+    def copy_selected_all(self):
+        entry = self.get_single_selected_entry()
+
+        if entry is None:
+            return
+
+        text = (
+            f"Title: {entry.get('title', '')}\n"
+            f"Username: {entry.get('username', '')}\n"
+            f"Password: {entry.get('password', '')}\n"
+            f"URL: {entry.get('url', '')}"
+        )
+
+        try:
+            self.clipboard_service.copy_to_clipboard(
+                data=text,
+                data_type="text",
+                source_entry_id=entry.get("id"),
+                vault_unlocked=self.is_vault_unlocked(),
+                never_copy=bool(entry.get("never_copy_to_clipboard", False)),
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Буфер обмена",
+                str(exc),
+            )
+
+    def clear_clipboard_manual(self):
+        try:
+            self.clipboard_service.clear_clipboard(reason="manual")
+        except Exception:
+            messagebox.showwarning(
+                "Буфер обмена",
+                "Не удалось очистить буфер обмена. Очистите его вручную.",
+            )
+
+    def apply_clipboard_settings(self, settings: ClipboardSettings):
+        self.clipboard_settings = settings
+        self.clipboard_service.settings = settings
+        self.clipboard_service.settings.validate()
+
+        if hasattr(self, "clipboard_settings_store"):
+            try:
+                self.clipboard_settings_store.save(settings)
+            except Exception:
+                pass
+
+        self.update_clipboard_status()
+
+    def show_toast(self, title: str, message: str, duration_ms: int = 2500):
+        try:
+            toast = tk.Toplevel(self)
+            toast.title(title)
+            toast.resizable(False, False)
+            toast.attributes("-topmost", True)
+
+            frame = ttk.Frame(toast, padding=12)
+            frame.pack(fill="both", expand=True)
+
+            ttk.Label(
+                frame,
+                text=title,
+                font=("Segoe UI", 10, "bold"),
+            ).pack(anchor="w")
+
+            ttk.Label(
+                frame,
+                text=message,
+                wraplength=280,
+            ).pack(anchor="w", pady=(4, 0))
+
+            self.update_idletasks()
+
+            x = self.winfo_rootx() + self.winfo_width() - 330
+            y = self.winfo_rooty() + self.winfo_height() - 150
+
+            toast.geometry(f"300x90+{x}+{y}")
+            toast.after(duration_ms, toast.destroy)
+        except Exception:
+            pass
+
+    def get_entry_title_by_id(self, entry_id) -> str:
+        for entry in self.all_entries:
+            if str(entry.get("id")) == str(entry_id):
+                return str(entry.get("title", ""))
+
+        return ""
+
+    def show_clipboard_preview(self):
+        status = self.clipboard_service.get_status()
+
+        if not status.active:
+            messagebox.showinfo(
+                "Буфер обмена",
+                "Буфер обмена пуст.",
+            )
+            return
+
+        source_title = self.get_entry_title_by_id(status.source_entry_id)
+
+        text = (
+            f"Тип данных: {status.data_type}\n"
+            f"Источник: {source_title or 'не указан'}\n"
+            f"Предпросмотр: {status.preview}\n"
+            f"Осталось секунд: {int(status.remaining_seconds)}"
+        )
+
+        messagebox.showinfo(
+            "Предпросмотр буфера обмена",
+            text,
+        )
+
+    def reveal_clipboard_preview_with_auth(self):
+        status = self.clipboard_service.get_status()
+
+        if not status.active:
+            messagebox.showinfo(
+                "Буфер обмена",
+                "Буфер обмена пуст.",
+            )
+            return
+
+        answer = messagebox.askyesno(
+            "Подтверждение",
+            "Показать полное содержимое буфера обмена?\n\n"
+            "Делайте это только если рядом нет посторонних.",
+        )
+
+        if not answer:
+            return
+
+        plaintext = self.clipboard_service.get_current_plaintext_for_testing()
+
+        messagebox.showinfo(
+            "Полное содержимое буфера",
+            plaintext,
+        )
+
+    def on_table_left_click(self, event):
+        action, entry_id = self.table.identify_action(event)
+
+        if action is None or entry_id is None:
+            return None
+
+        self.table.tree.selection_set(str(entry_id))
+
+        if action == self.table.ACTION_COPY_PASSWORD:
+            entry = self.get_single_entry_by_id(entry_id)
+
+            if entry is not None:
+                self.copy_entry_field_to_clipboard(
+                    entry=entry,
+                    field_name="password",
+                    data_type="password",
+                )
+
+            return "break"
+
+        if action == self.table.ACTION_COPY_USERNAME:
+            entry = self.get_single_entry_by_id(entry_id)
+
+            if entry is not None:
+                self.copy_entry_field_to_clipboard(
+                    entry=entry,
+                    field_name="username",
+                    data_type="username",
+                )
+
+            return "break"
+
+        return None
 
     def refresh_entries(self):
         if self.entry_manager is None:
@@ -245,10 +735,7 @@ class MainWindow(tk.Tk):
                 f"Показано: {len(self.displayed_entries)}"
             )
         except Exception:
-            messagebox.showerror(
-                "Ошибка",
-                "Не удалось загрузить записи.",
-            )
+            messagebox.showerror("Ошибка", "Не удалось загрузить записи.")
 
     def apply_search(self, update_status: bool = True):
         query = self.search_var.get().strip()
@@ -263,7 +750,6 @@ class MainWindow(tk.Tk):
             return
 
         parsed = self.parse_search_query(query)
-
         filtered = []
 
         for entry in self.all_entries:
@@ -307,10 +793,7 @@ class MainWindow(tk.Tk):
         filters: dict[str, list[str]] = {}
         free_terms = []
 
-        pattern = re.compile(
-            r'(?P<field>[a-zA-Z_]+):(?P<value>"[^"]+"|\S+)'
-        )
-
+        pattern = re.compile(r'(?P<field>[a-zA-Z_]+):(?P<value>"[^"]+"|\S+)')
         consumed_spans = []
 
         for match in pattern.finditer(query):
@@ -333,6 +816,7 @@ class MainWindow(tk.Tk):
         for start, end in consumed_spans:
             if start > last_index:
                 remaining_parts.append(query[last_index:start])
+
             last_index = end
 
         if last_index < len(query):
@@ -346,7 +830,6 @@ class MainWindow(tk.Tk):
                 for part in re.findall(r'"[^"]+"|\S+', remaining_text)
                 if part.strip()
             ]
-
             free_terms = [
                 term[1:-1] if term.startswith('"') and term.endswith('"') else term
                 for term in free_terms
@@ -370,7 +853,11 @@ class MainWindow(tk.Tk):
 
         return True
 
-    def entry_matches_filters(self, entry: dict[str, Any], filters: dict[str, list[str]]) -> bool:
+    def entry_matches_filters(
+        self,
+        entry: dict[str, Any],
+        filters: dict[str, list[str]],
+    ) -> bool:
         for field, values in filters.items():
             for value in values:
                 if not self.entry_matches_single_filter(entry, field, value):
@@ -378,7 +865,12 @@ class MainWindow(tk.Tk):
 
         return True
 
-    def entry_matches_single_filter(self, entry: dict[str, Any], field: str, value: str) -> bool:
+    def entry_matches_single_filter(
+        self,
+        entry: dict[str, Any],
+        field: str,
+        value: str,
+    ) -> bool:
         value = str(value or "").strip()
 
         if not value:
@@ -409,12 +901,10 @@ class MainWindow(tk.Tk):
         return True
 
     def build_searchable_text(self, entry: dict[str, Any]) -> str:
-        values = []
-
-        for field in self.SEARCHABLE_FIELDS:
-            values.append(str(entry.get(field, "")))
-
-        return " ".join(values).lower()
+        return " ".join(
+            str(entry.get(field, ""))
+            for field in self.SEARCHABLE_FIELDS
+        ).lower()
 
     def text_matches(self, query: str, text: str) -> bool:
         query = str(query or "").lower().strip()
@@ -449,7 +939,9 @@ class MainWindow(tk.Tk):
         return ratio >= self.FUZZY_THRESHOLD
 
     def entry_date_is_after_or_equal(self, entry: dict[str, Any], date_value: str) -> bool:
-        entry_date = self.parse_date(str(entry.get("updated_at", "") or entry.get("created_at", "")))
+        entry_date = self.parse_date(
+            str(entry.get("updated_at", "") or entry.get("created_at", ""))
+        )
         filter_date = self.parse_date(date_value)
 
         if entry_date is None or filter_date is None:
@@ -458,7 +950,9 @@ class MainWindow(tk.Tk):
         return entry_date >= filter_date
 
     def entry_date_is_before_or_equal(self, entry: dict[str, Any], date_value: str) -> bool:
-        entry_date = self.parse_date(str(entry.get("updated_at", "") or entry.get("created_at", "")))
+        entry_date = self.parse_date(
+            str(entry.get("updated_at", "") or entry.get("created_at", ""))
+        )
         filter_date = self.parse_date(date_value)
 
         if entry_date is None or filter_date is None:
@@ -515,40 +1009,28 @@ class MainWindow(tk.Tk):
             "Справка по поиску",
             (
                 "Поиск поддерживает:\n\n"
-                "1. Обычный поиск:\n"
-                "   github\n\n"
-                "2. Нечёткий поиск с опечатками:\n"
-                "   githab\n\n"
-                "3. Фильтры по полям:\n"
-                "   title:\"работа\"\n"
-                "   username:\"user\"\n"
-                "   url:\"github\"\n"
-                "   notes:\"важное\"\n"
-                "   category:\"учёба\"\n"
-                "   tag:\"python\"\n\n"
-                "4. Фильтры по датам:\n"
-                "   date_from:\"2026-01-01\"\n"
-                "   date_to:\"2026-12-31\"\n\n"
-                "5. Фильтр по надёжности пароля:\n"
-                "   strength:3\n\n"
+                "github\n"
+                "githab — нечёткий поиск\n"
+                "title:\"работа\"\n"
+                "username:\"user\"\n"
+                "url:\"github\"\n"
+                "category:\"учёба\"\n"
+                "tag:\"python\"\n"
+                "date_from:\"2026-01-01\"\n"
+                "date_to:\"2026-12-31\"\n"
+                "strength:3\n\n"
                 "История поиска хранит последние 10 запросов."
             ),
         )
-
-    def selected_entry_id(self):
-        selected_ids = self.table.get_selected_ids()
-
-        if not selected_ids:
-            messagebox.showwarning("Выбор записи", "Выберите запись.")
-            return None
-
-        return selected_ids[0]
 
     def selected_entry_ids(self) -> list[int]:
         selected_ids = self.table.get_selected_ids()
 
         if not selected_ids:
-            messagebox.showwarning("Выбор записи", "Выберите одну или несколько записей.")
+            messagebox.showwarning(
+                "Выбор записи",
+                "Выберите одну или несколько записей.",
+            )
             return []
 
         return selected_ids
@@ -669,41 +1151,6 @@ class MainWindow(tk.Tk):
 
         self.table.toggle_selected_password_visibility()
 
-    def copy_selected_password_stub(self):
-        selected_ids = self.table.get_selected_ids()
-
-        if not selected_ids:
-            messagebox.showwarning(
-                "Выбор записи",
-                "Выберите запись.",
-            )
-            return
-
-        entry_id = selected_ids[0]
-
-        try:
-            if self.entry_manager is not None and hasattr(
-                    self.entry_manager,
-                    "request_clipboard_copy",
-            ):
-                self.entry_manager.request_clipboard_copy(
-                    entry_id=entry_id,
-                    field_name="password",
-                )
-
-            self.clipboard_service.request_copy_secret("copy_selected_password")
-
-        except ClipboardIntegrationNotEnabledError as exc:
-            messagebox.showinfo(
-                "Буфер обмена",
-                str(exc),
-            )
-        except Exception:
-            messagebox.showerror(
-                "Буфер обмена",
-                "Не удалось подготовить операцию с буфером обмена.",
-            )
-
     def show_context_menu(self, event):
         row_id = self.table.tree.identify_row(event.y)
 
@@ -763,7 +1210,12 @@ class MainWindow(tk.Tk):
         self.secure_clear_decrypted_data()
 
         try:
-            self.clipboard_service.clear()
+            self.clipboard_service.close()
+        except Exception:
+            pass
+
+        try:
+            self.clipboard_monitor.stop()
         except Exception:
             pass
 
@@ -781,13 +1233,10 @@ class MainWindow(tk.Tk):
 
         self.destroy()
 
-    def show_safe_error(self, title: str, message: str):
-        messagebox.showerror(title, message)
-
     def about(self):
         messagebox.showinfo(
             "О программе",
-            "CryptoSafe Manager — Sprint 3: AES-GCM, CRUD, поиск, таблица и безопасность",
+            "CryptoSafe Manager — Sprint 4: secure clipboard with auto-clear",
         )
 
     def _stub(self):

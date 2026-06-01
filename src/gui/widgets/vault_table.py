@@ -10,6 +10,9 @@ class VaultTable(ttk.Frame):
     PASSWORD_VISIBLE_ICON = "👁 "
     PASSWORD_HIDDEN_ICON = "•••• "
 
+    ACTION_COPY_PASSWORD = "Copy Password"
+    ACTION_COPY_USERNAME = "Copy Username"
+
     def __init__(self, parent):
         super().__init__(parent)
 
@@ -21,6 +24,9 @@ class VaultTable(ttk.Frame):
         self.sort_column: str | None = None
         self.sort_reverse = False
 
+        self.clipboard_entry_id: int | None = None
+        self.clipboard_data_type: str | None = None
+
         self._build_table()
 
     def _build_table(self):
@@ -30,6 +36,9 @@ class VaultTable(ttk.Frame):
             "domain",
             "password",
             "updated_at",
+            "clipboard",
+            "copy_password",
+            "copy_username",
         )
 
         self.tree = ttk.Treeview(
@@ -64,12 +73,28 @@ class VaultTable(ttk.Frame):
             text="Изменено",
             command=lambda: self.sort_by("updated_at"),
         )
+        self.tree.heading(
+            "clipboard",
+            text="Буфер",
+            command=lambda: self.sort_by("clipboard"),
+        )
+        self.tree.heading(
+            "copy_password",
+            text="Copy Password",
+        )
+        self.tree.heading(
+            "copy_username",
+            text="Copy Username",
+        )
 
-        self.tree.column("title", width=220, minwidth=140, anchor="w", stretch=True)
-        self.tree.column("username", width=170, minwidth=120, anchor="w", stretch=True)
-        self.tree.column("domain", width=220, minwidth=140, anchor="w", stretch=True)
-        self.tree.column("password", width=150, minwidth=110, anchor="center", stretch=True)
-        self.tree.column("updated_at", width=170, minwidth=130, anchor="center", stretch=True)
+        self.tree.column("title", width=210, minwidth=140, anchor="w", stretch=True)
+        self.tree.column("username", width=160, minwidth=120, anchor="w", stretch=True)
+        self.tree.column("domain", width=190, minwidth=120, anchor="w", stretch=True)
+        self.tree.column("password", width=130, minwidth=110, anchor="center", stretch=True)
+        self.tree.column("updated_at", width=160, minwidth=130, anchor="center", stretch=True)
+        self.tree.column("clipboard", width=120, minwidth=90, anchor="center", stretch=False)
+        self.tree.column("copy_password", width=130, minwidth=110, anchor="center", stretch=False)
+        self.tree.column("copy_username", width=130, minwidth=110, anchor="center", stretch=False)
 
         y_scrollbar = ttk.Scrollbar(
             self,
@@ -135,6 +160,9 @@ class VaultTable(ttk.Frame):
                     self._extract_domain(entry.get("url", "")),
                     self._password_display(entry),
                     entry.get("updated_at", ""),
+                    self._clipboard_display(entry_id_int),
+                    "Copy Password",
+                    "Copy Username",
                 ),
             )
 
@@ -149,7 +177,25 @@ class VaultTable(ttk.Frame):
         self.entries.clear()
         self.revealed_password_ids.clear()
         self.show_passwords_global = False
+        self.clipboard_entry_id = None
+        self.clipboard_data_type = None
         self.clear()
+
+    def set_clipboard_marker(
+        self,
+        entry_id: int | str | None,
+        data_type: str | None,
+    ) -> None:
+        if entry_id is None:
+            self.clipboard_entry_id = None
+        else:
+            try:
+                self.clipboard_entry_id = int(entry_id)
+            except (TypeError, ValueError):
+                self.clipboard_entry_id = None
+
+        self.clipboard_data_type = data_type
+        self._render_entries()
 
     def sort_by(self, column: str):
         if self.sort_column == column:
@@ -176,6 +222,9 @@ class VaultTable(ttk.Frame):
             "domain": "Домен",
             "password": "Пароль",
             "updated_at": "Изменено",
+            "clipboard": "Буфер",
+            "copy_password": "Copy Password",
+            "copy_username": "Copy Username",
         }
 
         for column, title in headings.items():
@@ -200,6 +249,14 @@ class VaultTable(ttk.Frame):
 
         if column == "updated_at":
             return str(entry.get("updated_at", ""))
+
+        if column == "clipboard":
+            try:
+                entry_id = int(entry.get("id"))
+            except (TypeError, ValueError):
+                return ""
+
+            return "1" if entry_id == self.clipboard_entry_id else "0"
 
         return ""
 
@@ -248,6 +305,18 @@ class VaultTable(ttk.Frame):
 
         return self.PASSWORD_HIDDEN_ICON + self.PASSWORD_MASK
 
+    def _clipboard_display(self, entry_id: int) -> str:
+        if self.clipboard_entry_id is None:
+            return ""
+
+        if entry_id != self.clipboard_entry_id:
+            return ""
+
+        if self.clipboard_data_type:
+            return f"В буфере: {self.clipboard_data_type}"
+
+        return "В буфере"
+
     def toggle_global_password_visibility(self):
         self.show_passwords_global = not self.show_passwords_global
 
@@ -280,6 +349,30 @@ class VaultTable(ttk.Frame):
             self.revealed_password_ids.add(entry_id)
 
         self._render_entries()
+
+    def identify_action(self, event) -> tuple[str | None, int | None]:
+        if self.tree is None:
+            return None, None
+
+        row_id = self.tree.identify_row(event.y)
+        column_id = self.tree.identify_column(event.x)
+
+        if not row_id:
+            return None, None
+
+        try:
+            entry_id = int(row_id)
+        except ValueError:
+            return None, None
+
+
+        if column_id == "#7":
+            return self.ACTION_COPY_PASSWORD, entry_id
+
+        if column_id == "#8":
+            return self.ACTION_COPY_USERNAME, entry_id
+
+        return None, entry_id
 
     def _on_double_click(self, event):
         if self.tree is None:
