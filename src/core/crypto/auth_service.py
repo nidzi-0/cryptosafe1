@@ -4,6 +4,7 @@ import base64
 import hashlib
 import os
 import sqlite3
+import hmac
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,17 +28,6 @@ class InvalidMasterPasswordError(AuthServiceError):
 
 
 class AuthService:
-    """
-    Сервис мастер-пароля.
-
-    Отвечает за:
-    - первичную регистрацию мастер-пароля;
-    - проверку существования мастер-пароля;
-    - вход по мастер-паролю;
-    - смену мастер-пароля;
-    - получение ключа шифрования для AES-GCM.
-    """
-
     SALT_SIZE = 16
     KEY_SIZE = 32
 
@@ -292,4 +282,7 @@ class AuthService:
         if isinstance(b, memoryview):
             b = b.tobytes()
 
-        return hashlib.sha256(a).digest() == hashlib.sha256(b).digest()
+        if not isinstance(a, bytes) or not isinstance(b, bytes):
+            return False
+
+        return hmac.compare_digest(a, b)

@@ -1,30 +1,86 @@
 from __future__ import annotations
 
+import re
 import tkinter as tk
+from collections import deque
+from datetime import datetime
+from difflib import SequenceMatcher
 from tkinter import messagebox, ttk
+from typing import Any
 
-from src.gui.widgets.vault_table import VaultTable
-from src.gui.widgets.audit_log_viewer import AuditLogViewer
-from src.gui.settings_dialog import SettingsDialog
+from src.core.security.clipboard_service import (
+    ClipboardIntegrationNotEnabledError,
+    ClipboardService,
+)
+from src.core.vault.password_generator import PasswordGenerator
 from src.gui.change_password_dialog import ChangePasswordDialog
 from src.gui.entry_dialog import EntryDialog
+from src.gui.settings_dialog import SettingsDialog
+from src.gui.widgets.audit_log_viewer import AuditLogViewer
+from src.gui.widgets.vault_table import VaultTable
 
 
 class MainWindow(tk.Tk):
+    SEARCH_HISTORY_LIMIT = 10
+    FUZZY_THRESHOLD = 0.72
+
+    SEARCHABLE_FIELDS = (
+        "title",
+        "username",
+        "url",
+        "notes",
+        "category",
+        "tags",
+    )
+
+    FILTER_ALIASES = {
+        "title": "title",
+        "name": "title",
+        "username": "username",
+        "user": "username",
+        "login": "username",
+        "url": "url",
+        "site": "url",
+        "notes": "notes",
+        "note": "notes",
+        "category": "category",
+        "cat": "category",
+        "tag": "tags",
+        "tags": "tags",
+        "date_from": "date_from",
+        "from": "date_from",
+        "date_to": "date_to",
+        "to": "date_to",
+        "strength": "strength",
+        "score": "strength",
+    }
+
     def __init__(self):
         super().__init__()
 
         self.title("CryptoSafe Manager")
-        self.geometry("900x560")
-        self.minsize(850, 520)
+        self.geometry("1080x660")
+        self.minsize(980, 580)
 
         self.auth_service = None
         self.entry_manager = None
-        self.all_entries = []
+        self.key_manager = None
+
+        self.all_entries: list[dict[str, Any]] = []
+        self.displayed_entries: list[dict[str, Any]] = []
+
+        self.password_generator = PasswordGenerator()
+        self.clipboard_service = ClipboardService()
+
+        self.passwords_visible_var = tk.BooleanVar(value=False)
+        self.search_history: deque[str] = deque(maxlen=self.SEARCH_HISTORY_LIMIT)
 
         self._build_menu()
         self._build_toolbar()
         self._build_table()
+        self._bind_hotkeys()
+
+        self.protocol("WM_DELETE_WINDOW", self.secure_close)
 
         self.status_var = tk.StringVar(value="Статус: заблокировано")
         self.status = ttk.Label(self, textvariable=self.status_var, anchor="w")
@@ -36,6 +92,9 @@ class MainWindow(tk.Tk):
     def set_entry_manager(self, entry_manager):
         self.entry_manager = entry_manager
         self.refresh_entries()
+
+    def set_key_manager(self, key_manager):
+        self.key_manager = key_manager
 
     def _build_menu(self):
         menubar = tk.Menu(self)
@@ -50,12 +109,18 @@ class MainWindow(tk.Tk):
             command=self.change_master_password,
         )
         file_menu.add_separator()
-        file_menu.add_command(label="Выход", command=self.destroy)
+        file_menu.add_command(label="Выход", command=self.secure_close)
 
         edit_menu = tk.Menu(menubar, tearoff=0)
         edit_menu.add_command(label="Добавить", command=self.add_entry)
         edit_menu.add_command(label="Изменить", command=self.edit_entry)
         edit_menu.add_command(label="Удалить", command=self.delete_entry)
+        edit_menu.add_separator()
+        edit_menu.add_command(
+            label="Показать/скрыть пароль выбранной записи",
+            command=self.toggle_selected_passwords,
+            accelerator="Ctrl+Shift+P",
+        )
 
         view_menu = tk.Menu(menubar, tearoff=0)
         view_menu.add_command(label="Логи", command=self.open_logs)
@@ -75,22 +140,72 @@ class MainWindow(tk.Tk):
         toolbar = ttk.Frame(self)
         toolbar.pack(fill="x", padx=10, pady=8)
 
-        ttk.Button(toolbar, text="Добавить", command=self.add_entry).pack(side="left")
+        ttk.Button(
+            toolbar,
+            text="Добавить",
+            command=self.add_entry,
+        ).pack(side="left")
 
-        ttk.Button(toolbar, text="Изменить", command=self.edit_entry).pack(
-            side="left", padx=(6, 0)
+        ttk.Button(
+            toolbar,
+            text="Изменить",
+            command=self.edit_entry,
+        ).pack(side="left", padx=(6, 0))
+
+        ttk.Button(
+            toolbar,
+            text="Удалить",
+            command=self.delete_entry,
+        ).pack(side="left", padx=(6, 0))
+
+        ttk.Separator(toolbar, orient="vertical").pack(
+            side="left",
+            fill="y",
+            padx=10,
         )
 
-        ttk.Button(toolbar, text="Удалить", command=self.delete_entry).pack(
-            side="left", padx=(6, 0)
+        self.passwords_button = ttk.Checkbutton(
+            toolbar,
+            text="Показать пароли",
+            variable=self.passwords_visible_var,
+            command=self.toggle_global_passwords,
         )
+        self.passwords_button.pack(side="left")
+
+        ttk.Button(
+            toolbar,
+            text="👁 выбранные",
+            command=self.toggle_selected_passwords,
+        ).pack(side="left", padx=(6, 0))
 
         ttk.Label(toolbar, text="Поиск:").pack(side="left", padx=(20, 6))
 
         self.search_var = tk.StringVar()
         self.search_var.trace_add("write", lambda *_: self.apply_search())
 
-        ttk.Entry(toolbar, textvariable=self.search_var, width=35).pack(side="left")
+        self.search_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self.search_var,
+            width=42,
+            values=[],
+        )
+        self.search_combo.pack(side="left")
+
+        self.search_combo.bind("<<ComboboxSelected>>", lambda event: self.apply_search())
+        self.search_combo.bind("<Return>", lambda event: self.remember_search_query())
+
+        ttk.Button(
+            toolbar,
+            text="Очистить",
+            command=self.clear_search,
+        ).pack(side="left", padx=(6, 0))
+
+        ttk.Button(
+            toolbar,
+            text="?",
+            width=3,
+            command=self.show_search_help,
+        ).pack(side="left", padx=(6, 0))
 
     def _build_table(self):
         self.table = VaultTable(self)
@@ -99,8 +214,22 @@ class MainWindow(tk.Tk):
         self.context_menu = tk.Menu(self, tearoff=0)
         self.context_menu.add_command(label="Изменить", command=self.edit_entry)
         self.context_menu.add_command(label="Удалить", command=self.delete_entry)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(
+            label="Показать/скрыть пароль",
+            command=self.toggle_selected_passwords,
+        )
+        self.context_menu.add_separator()
+        self.context_menu.add_command(
+            label="Копировать пароль (Sprint 4)",
+            command=self.copy_selected_password_stub,
+        )
 
         self.table.tree.bind("<Button-3>", self.show_context_menu)
+
+    def _bind_hotkeys(self):
+        self.bind_all("<Control-Shift-P>", lambda event: self.toggle_selected_passwords())
+        self.bind_all("<Control-Shift-p>", lambda event: self.toggle_selected_passwords())
 
     def refresh_entries(self):
         if self.entry_manager is None:
@@ -108,58 +237,321 @@ class MainWindow(tk.Tk):
 
         try:
             self.all_entries = self.entry_manager.get_all_entries()
-            self.table.load_entries(self.all_entries)
+            self.apply_search(update_status=False)
+
             self.status_var.set(
-                f"Статус: разблокировано | Записей: {len(self.all_entries)}"
+                f"Статус: разблокировано | "
+                f"Всего записей: {len(self.all_entries)} | "
+                f"Показано: {len(self.displayed_entries)}"
             )
-        except Exception as exc:
+        except Exception:
             messagebox.showerror(
                 "Ошибка",
-                f"Не удалось загрузить записи:\n{exc}",
+                "Не удалось загрузить записи.",
             )
 
-    def apply_search(self):
-        query = self.search_var.get().strip().lower()
+    def apply_search(self, update_status: bool = True):
+        query = self.search_var.get().strip()
+
+        if query:
+            self.remember_search_query()
 
         if not query:
-            self.table.load_entries(self.all_entries)
+            self.displayed_entries = list(self.all_entries)
+            self.table.load_entries(self.displayed_entries)
+            self._update_status_after_search(update_status)
             return
+
+        parsed = self.parse_search_query(query)
 
         filtered = []
 
         for entry in self.all_entries:
-            text = " ".join(
-                [
-                    str(entry.get("title", "")),
-                    str(entry.get("username", "")),
-                    str(entry.get("url", "")),
-                    str(entry.get("notes", "")),
-                    str(entry.get("category", "")),
-                    str(entry.get("tags", "")),
-                ]
-            ).lower()
-
-            if query in text:
+            if self.entry_matches_search(entry, parsed):
                 filtered.append(entry)
 
-        self.table.load_entries(filtered)
+        self.displayed_entries = filtered
+        self.table.load_entries(self.displayed_entries)
+
+        self._update_status_after_search(update_status)
+
+    def _update_status_after_search(self, update_status: bool = True):
+        if not update_status:
+            return
+
+        self.status_var.set(
+            f"Статус: разблокировано | "
+            f"Всего записей: {len(self.all_entries)} | "
+            f"Показано: {len(self.displayed_entries)}"
+        )
+
+    def remember_search_query(self):
+        query = self.search_var.get().strip()
+
+        if not query:
+            return
+
+        if query in self.search_history:
+            self.search_history.remove(query)
+
+        self.search_history.appendleft(query)
+        self.search_combo.configure(values=list(self.search_history))
+
+    def clear_search(self):
+        self.search_var.set("")
+        self.displayed_entries = list(self.all_entries)
+        self.table.load_entries(self.displayed_entries)
+        self._update_status_after_search(True)
+
+    def parse_search_query(self, query: str) -> dict[str, Any]:
+        filters: dict[str, list[str]] = {}
+        free_terms = []
+
+        pattern = re.compile(
+            r'(?P<field>[a-zA-Z_]+):(?P<value>"[^"]+"|\S+)'
+        )
+
+        consumed_spans = []
+
+        for match in pattern.finditer(query):
+            raw_field = match.group("field").strip().lower()
+            raw_value = match.group("value").strip()
+
+            if raw_value.startswith('"') and raw_value.endswith('"'):
+                raw_value = raw_value[1:-1]
+
+            field = self.FILTER_ALIASES.get(raw_field)
+
+            if field:
+                filters.setdefault(field, []).append(raw_value)
+
+            consumed_spans.append(match.span())
+
+        remaining_parts = []
+        last_index = 0
+
+        for start, end in consumed_spans:
+            if start > last_index:
+                remaining_parts.append(query[last_index:start])
+            last_index = end
+
+        if last_index < len(query):
+            remaining_parts.append(query[last_index:])
+
+        remaining_text = " ".join(remaining_parts).strip()
+
+        if remaining_text:
+            free_terms = [
+                part.strip()
+                for part in re.findall(r'"[^"]+"|\S+', remaining_text)
+                if part.strip()
+            ]
+
+            free_terms = [
+                term[1:-1] if term.startswith('"') and term.endswith('"') else term
+                for term in free_terms
+            ]
+
+        return {
+            "raw": query,
+            "filters": filters,
+            "free_terms": free_terms,
+        }
+
+    def entry_matches_search(self, entry: dict[str, Any], parsed: dict[str, Any]) -> bool:
+        filters = parsed["filters"]
+        free_terms = parsed["free_terms"]
+
+        if filters and not self.entry_matches_filters(entry, filters):
+            return False
+
+        if free_terms and not self.entry_matches_free_terms(entry, free_terms):
+            return False
+
+        return True
+
+    def entry_matches_filters(self, entry: dict[str, Any], filters: dict[str, list[str]]) -> bool:
+        for field, values in filters.items():
+            for value in values:
+                if not self.entry_matches_single_filter(entry, field, value):
+                    return False
+
+        return True
+
+    def entry_matches_single_filter(self, entry: dict[str, Any], field: str, value: str) -> bool:
+        value = str(value or "").strip()
+
+        if not value:
+            return True
+
+        if field in self.SEARCHABLE_FIELDS:
+            field_value = str(entry.get(field, "")).lower()
+            return self.text_matches(value.lower(), field_value)
+
+        if field == "date_from":
+            return self.entry_date_is_after_or_equal(entry, value)
+
+        if field == "date_to":
+            return self.entry_date_is_before_or_equal(entry, value)
+
+        if field == "strength":
+            return self.entry_password_strength_at_least(entry, value)
+
+        return True
+
+    def entry_matches_free_terms(self, entry: dict[str, Any], terms: list[str]) -> bool:
+        searchable_text = self.build_searchable_text(entry)
+
+        for term in terms:
+            if not self.text_matches(term.lower(), searchable_text):
+                return False
+
+        return True
+
+    def build_searchable_text(self, entry: dict[str, Any]) -> str:
+        values = []
+
+        for field in self.SEARCHABLE_FIELDS:
+            values.append(str(entry.get(field, "")))
+
+        return " ".join(values).lower()
+
+    def text_matches(self, query: str, text: str) -> bool:
+        query = str(query or "").lower().strip()
+        text = str(text or "").lower().strip()
+
+        if not query:
+            return True
+
+        if query in text:
+            return True
+
+        words = re.findall(r"[a-zA-Zа-яА-ЯёЁ0-9_@.\-]+", text)
+
+        for word in words:
+            if self.fuzzy_match(query, word):
+                return True
+
+        return False
+
+    def fuzzy_match(self, query: str, candidate: str) -> bool:
+        query = query.strip().lower()
+        candidate = candidate.strip().lower()
+
+        if not query or not candidate:
+            return False
+
+        if len(query) <= 2:
+            return False
+
+        ratio = SequenceMatcher(None, query, candidate).ratio()
+
+        return ratio >= self.FUZZY_THRESHOLD
+
+    def entry_date_is_after_or_equal(self, entry: dict[str, Any], date_value: str) -> bool:
+        entry_date = self.parse_date(str(entry.get("updated_at", "") or entry.get("created_at", "")))
+        filter_date = self.parse_date(date_value)
+
+        if entry_date is None or filter_date is None:
+            return False
+
+        return entry_date >= filter_date
+
+    def entry_date_is_before_or_equal(self, entry: dict[str, Any], date_value: str) -> bool:
+        entry_date = self.parse_date(str(entry.get("updated_at", "") or entry.get("created_at", "")))
+        filter_date = self.parse_date(date_value)
+
+        if entry_date is None or filter_date is None:
+            return False
+
+        return entry_date <= filter_date
+
+    def parse_date(self, value: str) -> datetime | None:
+        value = str(value or "").strip()
+
+        if not value:
+            return None
+
+        normalized = value.replace("Z", "+00:00")
+
+        formats = [
+            "%Y-%m-%d",
+            "%Y-%m-%d %H:%M:%S",
+            "%d.%m.%Y",
+            "%d.%m.%Y %H:%M:%S",
+        ]
+
+        try:
+            return datetime.fromisoformat(normalized)
+        except ValueError:
+            pass
+
+        for fmt in formats:
+            try:
+                return datetime.strptime(normalized, fmt)
+            except ValueError:
+                continue
+
+        return None
+
+    def entry_password_strength_at_least(self, entry: dict[str, Any], value: str) -> bool:
+        try:
+            required_score = int(value)
+        except ValueError:
+            return False
+
+        password = str(entry.get("password", ""))
+
+        try:
+            result = self.password_generator.analyze_strength(password)
+            score = int(result.get("score", 0))
+        except Exception:
+            score = 0
+
+        return score >= required_score
+
+    def show_search_help(self):
+        messagebox.showinfo(
+            "Справка по поиску",
+            (
+                "Поиск поддерживает:\n\n"
+                "1. Обычный поиск:\n"
+                "   github\n\n"
+                "2. Нечёткий поиск с опечатками:\n"
+                "   githab\n\n"
+                "3. Фильтры по полям:\n"
+                "   title:\"работа\"\n"
+                "   username:\"user\"\n"
+                "   url:\"github\"\n"
+                "   notes:\"важное\"\n"
+                "   category:\"учёба\"\n"
+                "   tag:\"python\"\n\n"
+                "4. Фильтры по датам:\n"
+                "   date_from:\"2026-01-01\"\n"
+                "   date_to:\"2026-12-31\"\n\n"
+                "5. Фильтр по надёжности пароля:\n"
+                "   strength:3\n\n"
+                "История поиска хранит последние 10 запросов."
+            ),
+        )
 
     def selected_entry_id(self):
-        selected = self.table.tree.selection()
+        selected_ids = self.table.get_selected_ids()
 
-        if not selected:
+        if not selected_ids:
             messagebox.showwarning("Выбор записи", "Выберите запись.")
             return None
 
-        try:
-            return int(selected[0])
-        except ValueError:
-            messagebox.showerror(
-                "Ошибка",
-                "Не удалось определить id выбранной записи. "
-                "Проверьте VaultTable.load_entries().",
-            )
-            return None
+        return selected_ids[0]
+
+    def selected_entry_ids(self) -> list[int]:
+        selected_ids = self.table.get_selected_ids()
+
+        if not selected_ids:
+            messagebox.showwarning("Выбор записи", "Выберите одну или несколько записей.")
+            return []
+
+        return selected_ids
 
     def add_entry(self):
         if self.entry_manager is None:
@@ -175,23 +567,39 @@ class MainWindow(tk.Tk):
         try:
             self.entry_manager.create_entry(dialog.result)
             self.refresh_entries()
-        except Exception as exc:
-            messagebox.showerror("Ошибка", str(exc))
+        except Exception:
+            messagebox.showerror(
+                "Ошибка",
+                "Не удалось сохранить запись. Проверьте данные формы.",
+            )
 
     def edit_entry(self):
         if self.entry_manager is None:
             messagebox.showerror("Ошибка", "Хранилище не подключено.")
             return
 
-        entry_id = self.selected_entry_id()
+        selected_ids = self.table.get_selected_ids()
 
-        if entry_id is None:
+        if not selected_ids:
+            messagebox.showwarning("Выбор записи", "Выберите запись.")
             return
+
+        if len(selected_ids) > 1:
+            messagebox.showwarning(
+                "Редактирование",
+                "Для редактирования выберите только одну запись.",
+            )
+            return
+
+        entry_id = selected_ids[0]
 
         try:
             current = self.entry_manager.get_entry(entry_id)
-        except Exception as exc:
-            messagebox.showerror("Ошибка", f"Не удалось открыть запись:\n{exc}")
+        except Exception:
+            messagebox.showerror(
+                "Ошибка",
+                "Не удалось открыть выбранную запись.",
+            )
             return
 
         dialog = EntryDialog(self, current)
@@ -203,41 +611,114 @@ class MainWindow(tk.Tk):
         try:
             self.entry_manager.update_entry(entry_id, dialog.result)
             self.refresh_entries()
-        except Exception as exc:
-            messagebox.showerror("Ошибка", str(exc))
+        except Exception:
+            messagebox.showerror(
+                "Ошибка",
+                "Не удалось обновить запись. Проверьте данные формы.",
+            )
 
     def delete_entry(self):
         if self.entry_manager is None:
             messagebox.showerror("Ошибка", "Хранилище не подключено.")
             return
 
-        entry_id = self.selected_entry_id()
+        selected_ids = self.selected_entry_ids()
 
-        if entry_id is None:
+        if not selected_ids:
             return
 
-        answer = messagebox.askyesno("Удаление", "Удалить выбранную запись?")
+        if len(selected_ids) == 1:
+            text = "Удалить выбранную запись?"
+        else:
+            text = f"Удалить выбранные записи: {len(selected_ids)} шт.?"
+
+        answer = messagebox.askyesno("Удаление", text)
 
         if not answer:
             return
 
+        has_errors = False
+
+        for entry_id in selected_ids:
+            try:
+                self.entry_manager.delete_entry(entry_id, soft_delete=True)
+            except Exception:
+                has_errors = True
+
+        self.refresh_entries()
+
+        if has_errors:
+            messagebox.showerror(
+                "Ошибка удаления",
+                "Не удалось удалить некоторые выбранные записи.",
+            )
+
+    def toggle_global_passwords(self):
+        visible = self.passwords_visible_var.get()
+        self.table.set_global_password_visibility(visible)
+
+    def toggle_selected_passwords(self):
+        selected_ids = self.table.get_selected_ids()
+
+        if not selected_ids:
+            messagebox.showwarning(
+                "Выбор записи",
+                "Выберите запись для показа или скрытия пароля.",
+            )
+            return
+
+        self.table.toggle_selected_password_visibility()
+
+    def copy_selected_password_stub(self):
+        selected_ids = self.table.get_selected_ids()
+
+        if not selected_ids:
+            messagebox.showwarning(
+                "Выбор записи",
+                "Выберите запись.",
+            )
+            return
+
+        entry_id = selected_ids[0]
+
         try:
-            self.entry_manager.delete_entry(entry_id, soft_delete=True)
-            self.refresh_entries()
-        except Exception as exc:
-            messagebox.showerror("Ошибка", str(exc))
+            if self.entry_manager is not None and hasattr(
+                    self.entry_manager,
+                    "request_clipboard_copy",
+            ):
+                self.entry_manager.request_clipboard_copy(
+                    entry_id=entry_id,
+                    field_name="password",
+                )
+
+            self.clipboard_service.request_copy_secret("copy_selected_password")
+
+        except ClipboardIntegrationNotEnabledError as exc:
+            messagebox.showinfo(
+                "Буфер обмена",
+                str(exc),
+            )
+        except Exception:
+            messagebox.showerror(
+                "Буфер обмена",
+                "Не удалось подготовить операцию с буфером обмена.",
+            )
 
     def show_context_menu(self, event):
         row_id = self.table.tree.identify_row(event.y)
 
         if row_id:
-            self.table.tree.selection_set(row_id)
+            current_selection = set(self.table.tree.selection())
+
+            if row_id not in current_selection:
+                self.table.tree.selection_set(row_id)
+
             self.context_menu.tk_popup(event.x_root, event.y_root)
 
     def open_logs(self):
         win = tk.Toplevel(self)
         win.title("Журнал аудита")
-        win.geometry("700x400")
+        win.geometry("760x440")
 
         AuditLogViewer(win).pack(
             fill="both",
@@ -260,10 +741,53 @@ class MainWindow(tk.Tk):
         dialog = ChangePasswordDialog(self, self.auth_service)
         self.wait_window(dialog)
 
+    def secure_clear_decrypted_data(self):
+        try:
+            self.all_entries.clear()
+        except Exception:
+            self.all_entries = []
+
+        try:
+            self.displayed_entries.clear()
+        except Exception:
+            self.displayed_entries = []
+
+        try:
+            self.table.secure_clear()
+        except Exception:
+            pass
+
+        self.passwords_visible_var.set(False)
+
+    def secure_close(self):
+        self.secure_clear_decrypted_data()
+
+        try:
+            self.clipboard_service.clear()
+        except Exception:
+            pass
+
+        try:
+            if self.key_manager is not None:
+                self.key_manager.clear_encryption_key()
+        except Exception:
+            pass
+
+        try:
+            if self.entry_manager is not None and hasattr(self.entry_manager, "close"):
+                self.entry_manager.close()
+        except Exception:
+            pass
+
+        self.destroy()
+
+    def show_safe_error(self, title: str, message: str):
+        messagebox.showerror(title, message)
+
     def about(self):
         messagebox.showinfo(
             "О программе",
-            "CryptoSafe Manager — Sprint 3: AES-GCM, CRUD, таблица записей",
+            "CryptoSafe Manager — Sprint 3: AES-GCM, CRUD, поиск, таблица и безопасность",
         )
 
     def _stub(self):

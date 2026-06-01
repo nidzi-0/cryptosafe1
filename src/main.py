@@ -6,6 +6,7 @@ from pathlib import Path
 from tkinter import messagebox
 
 from src.core.crypto.auth_service import AuthService
+from src.core.crypto.key_manager import CachedKeyManager
 from src.core.vault.encryption_service import AESGCMEncryptionService
 from src.core.vault.entry_manager import EntryManager
 from src.gui.main_window import MainWindow
@@ -65,7 +66,6 @@ def run_auth_dialog(root: MainWindow) -> tuple[bytes | None, AuthService | None]
 
     dialog = SetupWizard(root)
 
-    # Ждём, пока пользователь создаст пароль, войдёт или отменит вход.
     root.wait_window(dialog)
 
     print("[INFO] Окно входа / регистрации закрыто.")
@@ -99,9 +99,13 @@ def connect_vault_services(
     auth_service: AuthService,
     master_key: bytes,
 ) -> None:
-    print("[INFO] Создаю AESGCMEncryptionService...")
+    print("[INFO] Создаю CachedKeyManager...")
 
-    encryption_service = AESGCMEncryptionService(master_key)
+    key_manager = CachedKeyManager(master_key)
+
+    print("[INFO] Создаю AESGCMEncryptionService через KeyManager...")
+
+    encryption_service = AESGCMEncryptionService(key_manager)
 
     print("[INFO] Создаю EntryManager...")
 
@@ -112,6 +116,7 @@ def connect_vault_services(
 
     print("[INFO] Подключаю сервисы к главному окну...")
 
+    root.key_manager = key_manager
     root.set_auth_service(auth_service)
     root.set_entry_manager(entry_manager)
 
@@ -125,7 +130,6 @@ def main() -> None:
 
     root = MainWindow()
 
-    # Главное окно скрываем до успешного входа.
     root.withdraw()
 
     try:

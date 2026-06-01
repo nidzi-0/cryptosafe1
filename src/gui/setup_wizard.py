@@ -17,19 +17,6 @@ DB_PATH = DATA_DIR / "cryptosafe_dev.db"
 
 
 class SetupWizard(tk.Toplevel):
-    """
-    Окно регистрации или входа в хранилище.
-
-    Если мастер-пароль ещё не создан, открывается режим регистрации.
-    Если мастер-пароль уже создан, открывается режим входа.
-
-    После успешного действия возвращает:
-
-        self.result = {
-            "master_key": master_key,
-            "auth_service": auth_service,
-        }
-    """
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -49,15 +36,12 @@ class SetupWizard(tk.Toplevel):
         self.geometry("430x330")
         self.resizable(False, False)
 
-        # Важно: не делаем transient(parent), потому что parent скрыт через withdraw().
-        # Иначе окно может спрятаться вместе с главным окном.
         self.grab_set()
 
         self._build_ui()
 
         self.protocol("WM_DELETE_WINDOW", self.cancel)
 
-        # Принудительно показываем окно поверх PyCharm/терминала.
         self.update_idletasks()
         self.deiconify()
         self.lift()
@@ -66,7 +50,6 @@ class SetupWizard(tk.Toplevel):
         self.after(1000, lambda: self.attributes("-topmost", False))
         self.after(100, self.password_entry.focus_set)
 
-        # Центрирование окна.
         self._center_window()
 
     def _center_window(self):
