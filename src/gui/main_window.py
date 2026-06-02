@@ -7,6 +7,7 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from tkinter import messagebox, ttk
 from typing import Any
+from src.gui.dialogs.sprint6_dialogs import ExportDialog, ImportDialog, SharingDialog
 
 from src.core.clipboard.clipboard_monitor import ClipboardMonitor
 from src.core.clipboard.clipboard_service import (
@@ -144,6 +145,11 @@ class MainWindow(tk.Tk):
         file_menu.add_command(label="Создать", command=self._stub)
         file_menu.add_command(label="Открыть", command=self._stub)
         file_menu.add_command(label="Резервная копия", command=self._stub)
+        file_menu.add_separator()
+        file_menu.add_command(label="Экспорт хранилища", command=self._open_export_dialog)
+        file_menu.add_command(label="Импорт хранилища", command=self._open_import_dialog)
+        file_menu.add_command(label="Поделиться записью", command=self._open_sharing_dialog)
+        file_menu.add_separator()
         file_menu.add_separator()
         file_menu.add_command(
             label="Сменить мастер-пароль",
@@ -1243,4 +1249,32 @@ class MainWindow(tk.Tk):
         messagebox.showinfo(
             "Заглушка",
             "Это действие будет реализовано позже.",
+        )
+
+    def _open_export_dialog(self):
+        from src.gui.dialogs.sprint6_dialogs import ExportDialog
+
+        ExportDialog(
+            parent=self,
+            entry_manager=self.entry_manager,
+            audit_logger=getattr(self, "audit_logger", None),
+            master_password_verifier=getattr(self, "verify_master_password", None),
+        )
+
+    def _open_import_dialog(self):
+        from src.gui.dialogs.sprint6_dialogs import ImportDialog
+
+        ImportDialog(
+            parent=self,
+            entry_manager=self.entry_manager,
+            audit_logger=getattr(self, "audit_logger", None),
+        )
+
+    def _open_sharing_dialog(self):
+        from src.gui.dialogs.sprint6_dialogs import SharingDialog
+
+        SharingDialog(
+            parent=self,
+            db_connection=self.entry_manager,
+            audit_logger=getattr(self, "audit_logger", None),
         )
