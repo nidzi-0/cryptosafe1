@@ -1,244 +1,280 @@
 from __future__ import annotations
-import os
-import sys
-import tkinter as tk
-from tkinter import ttk, messagebox
 
-from src.core.vault.entry_manager import EntryManager
-from src.core.vault.password_generator import PasswordGenerator
+import sys
+import traceback
+from pathlib import Path
+from tkinter import messagebox
+
+from src.core.audit.audit_event_bridge import AuditEventBridge
+from src.core.audit.audit_logger import AuditLogger, AuditSeverity
+from src.core.audit.log_formatters import AuditLogExporter
+from src.core.audit.log_signer import AuditLogSigner
+from src.core.audit.log_verifier import AuditLogVerifier
+
+from src.core.clipboard.clipboard_settings_store import ClipboardSettingsStore
+from src.core.crypto.auth_service import AuthService
 from src.core.crypto.key_manager import CachedKeyManager
 from src.core.vault.encryption_service import AESGCMEncryptionService
+from src.core.vault.entry_manager import EntryManager
 
-from src.core.clipboard.clipboard_service import ClipboardService, ClipboardSettings
-from src.core.clipboard.clipboard_settings_store import ClipboardSettingsStore
-from src.core.clipboard.future_features import FutureIntegration
-
-from src.gui.widgets.vault_table import VaultTable
-from src.gui.entry_dialog import EntryDialog
-from src.gui.settings_dialog import SettingsDialog
-from src.gui.change_password_dialog import ChangePasswordDialog
-from src.gui.widgets.audit_log_viewer import AuditLogViewer
-
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "cryptosafe_dev.db")
+from src.gui.main_window import MainWindow
+from src.gui.setup_wizard import SetupWizard
 
 
-class MainWindow(tk.Tk):
-    def __init__(self):
-        super().__init__()
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+DB_PATH = DATA_DIR / "cryptosafe_dev.db"
 
-        self.title("CryptoSafe Manager")
-        self.geometry("1120x700")
-        self.minsize(1000, 600)
 
-        self.entry_manager = EntryManager(DB_PATH)
-        self.password_generator = PasswordGenerator()
+def ensure_data_dir() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-        self.clipboard_settings_store = ClipboardSettingsStore(DB_PATH)
-        self.clipboard_settings = self.clipboard_settings_store.load()
-        self.clipboard_service = ClipboardService(settings=self.clipboard_settings)
-        self.clipboard_service.subscribe(self.on_clipboard_event)
 
-        self.passwords_visible_var = tk.BooleanVar(value=False)
-
-        self.table = VaultTable(self)
-        self.table.pack(fill="both", expand=True, padx=10, pady=(0, 10))
-
-        # Context menu
-        self.context_menu = tk.Menu(self, tearoff=0)
-        self.context_menu.add_command(label="Изменить", command=self.edit_entry)
-        self.context_menu.add_command(label="Удалить", command=self.delete_entry)
-        self.context_menu.add_separator()
-        self.context_menu.add_command(
-            label="Показать/скрыть пароль",
-            command=self.toggle_selected_passwords,
+def show_fatal_error(title: str, exc: Exception) -> None:
+    error_text = "".join(
+        traceback.format_exception(
+            type(exc),
+            exc,
+            exc.__traceback__,
         )
-        self.context_menu.add_separator()
-        self.context_menu.add_command(
-            label="Копировать пароль",
-            command=self.copy_selected_password,
+    )
+
+    print(error_text, file=sys.stderr)
+
+    try:
+        messagebox.showerror(
+            title,
+            f"{exc}\n\nПодробности ошибки выведены в консоль.",
         )
-        self.context_menu.add_command(
-            label="Копировать логин",
-            command=self.copy_selected_username,
-        )
-        self.context_menu.add_command(
-            label="Копировать всё",
-            command=self.copy_selected_all,
-        )
-        self.context_menu.add_command(
-            label="Предпросмотр буфера",
-            command=self.show_clipboard_preview,
-        )
-        self.context_menu.add_command(
-            label="Показать содержимое буфера",
-            command=self.reveal_clipboard_preview_with_auth,
-        )
-        self.context_menu.add_separator()
-        self.context_menu.add_command(
-            label="Очистить буфер обмена",
-            command=self.clear_clipboard_manual,
-        )
+    except Exception:
+        pass
 
-        self.table.tree.bind("<Button-3>", self.show_context_menu)
-        self.table.tree.bind("<Button-1>", self.on_table_left_click)
 
-        self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", lambda *_: self.apply_search())
+def get_master_key_from_dialog_result(result) -> bytes | None:
+    if result is None:
+        return None
 
-        self.clipboard_status_var = tk.StringVar(value="Буфер обмена: пусто")
-        self.status_var = tk.StringVar(value="Статус: заблокировано")
-        self.status_frame = ttk.Frame(self)
-        self.status_frame.pack(fill="x", side="bottom", padx=10, pady=(0, 8))
+    if isinstance(result, bytes):
+        return result
 
-        ttk.Label(
-            self.status_frame,
-            textvariable=self.status_var,
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
+    if isinstance(result, dict):
+        master_key = result.get("master_key")
 
-        ttk.Label(
-            self.status_frame,
-            textvariable=self.clipboard_status_var,
-            anchor="e",
-        ).pack(side="right")
+        if isinstance(master_key, bytes):
+            return master_key
 
-        self.refresh_entries()
+    return None
 
-        # Future Integration INT-3 (Sprint 6/7) заглушки
-        FutureIntegration.generate_totp("secret123")
-        FutureIntegration.secure_share(1, "user@example.com")
-        FutureIntegration.panic_mode()
 
-        self.protocol("WM_DELETE_WINDOW", self.secure_close)
+def get_auth_service_from_dialog_result(result) -> AuthService | None:
+    if isinstance(result, dict):
+        auth_service = result.get("auth_service")
 
-    def on_clipboard_event(self, event):
-        if hasattr(self, "table") and self.table:
-            self.table.set_clipboard_marker(
-                getattr(event, "source_entry_id", None),
-                getattr(event, "data_type", None),
-            )
+        if isinstance(auth_service, AuthService):
+            return auth_service
 
-    def show_clipboard_preview(self):
-        status = self.clipboard_service.get_status()
-        if not status.active:
-            messagebox.showinfo("Буфер обмена", "Буфер обмена пуст.")
-            return
+    return None
 
-        messagebox.showinfo(
-            "Предпросмотр буфера",
-            f"Тип: {status.data_type}\nИсточник: {status.source_entry_id}\nPreview: {status.preview}",
+
+def run_auth_dialog(root: MainWindow) -> tuple[bytes | None, AuthService | None]:
+    print("[INFO] Открываю окно входа / регистрации...")
+
+    dialog = SetupWizard(root)
+
+    root.wait_window(dialog)
+
+    print("[INFO] Окно входа / регистрации закрыто.")
+
+    result = getattr(dialog, "result", None)
+
+    if result is None:
+        print("[INFO] Пользователь отменил вход.")
+        return None, None
+
+    master_key = get_master_key_from_dialog_result(result)
+    auth_service = get_auth_service_from_dialog_result(result)
+
+    if master_key is None:
+        raise RuntimeError(
+            "SetupWizard завершился, но не вернул master_key. "
+            "Проверь, что self.result содержит {'master_key': master_key}."
         )
 
-    def reveal_clipboard_preview_with_auth(self):
-        status = self.clipboard_service.get_status()
-        if not status.active:
-            messagebox.showinfo("Буфер обмена", "Буфер обмена пуст.")
-            return
-
-        answer = messagebox.askyesno(
-            "Подтверждение",
-            "Показать полное содержимое буфера обмена?",
+    if auth_service is None:
+        raise RuntimeError(
+            "SetupWizard завершился, но не вернул auth_service. "
+            "Проверь, что self.result содержит {'auth_service': auth_service}."
         )
-        if not answer:
-            return
 
-        plaintext = self.clipboard_service.get_current_plaintext_for_testing()
-        messagebox.showinfo("Полное содержимое буфера", plaintext)
+    return master_key, auth_service
 
-    def copy_selected_password(self):
-        entry = self.get_single_selected_entry()
-        if entry:
-            self.clipboard_service.copy_to_clipboard(entry.get("password", ""), "password", entry.get("id"))
 
-    def copy_selected_username(self):
-        entry = self.get_single_selected_entry()
-        if entry:
-            self.clipboard_service.copy_to_clipboard(entry.get("username", ""), "username", entry.get("id"))
+def connect_vault_services(
+    root: MainWindow,
+    auth_service: AuthService,
+    master_key: bytes,
+) -> None:
+    print("[INFO] Создаю CachedKeyManager...")
 
-    def copy_selected_all(self):
-        entry = self.get_single_selected_entry()
-        if entry:
-            data = f"Title: {entry.get('title')}\nUsername: {entry.get('username')}\nPassword: {entry.get('password')}\nURL: {entry.get('url')}"
-            self.clipboard_service.copy_to_clipboard(data, "text", entry.get("id"))
+    key_manager = CachedKeyManager(master_key)
 
-    def clear_clipboard_manual(self):
-        self.clipboard_service.clear_clipboard(reason="manual")
+    print("[INFO] Создаю AESGCMEncryptionService через KeyManager...")
 
-    def get_single_selected_entry(self):
-        selected_ids = self.table.get_selected_ids()
-        if not selected_ids:
-            return None
-        return self.entry_manager.get_entry(selected_ids[0])
+    encryption_service = AESGCMEncryptionService(key_manager)
 
-    def add_entry(self):
-        dialog = EntryDialog(self)
-        self.wait_window(dialog)
-        if dialog.result:
-            self.entry_manager.create_entry(dialog.result)
-            self.refresh_entries()
+    print("[INFO] Создаю EntryManager...")
 
-    def edit_entry(self):
-        entry = self.get_single_selected_entry()
-        if not entry:
-            return
-        dialog = EntryDialog(self, entry)
-        self.wait_window(dialog)
-        if dialog.result:
-            self.entry_manager.update_entry(entry["id"], dialog.result)
-            self.refresh_entries()
+    entry_manager = EntryManager(
+        db_path=DB_PATH,
+        encryption_service=encryption_service,
+    )
 
-    def delete_entry(self):
-        selected_ids = self.table.get_selected_ids()
-        for entry_id in selected_ids:
-            self.entry_manager.delete_entry(entry_id, soft_delete=True)
-        self.refresh_entries()
+    print("[INFO] Создаю ClipboardSettingsStore...")
 
-    def toggle_selected_passwords(self):
-        self.table.toggle_selected_password_visibility()
+    clipboard_settings_store = ClipboardSettingsStore(
+        db_path=DB_PATH,
+        encryption_service=encryption_service,
+    )
 
-    def refresh_entries(self):
-        self.all_entries = self.entry_manager.get_all_entries()
-        self.displayed_entries = self.all_entries[:]
-        self.table.load_entries(self.displayed_entries)
+    print("[INFO] Загружаю настройки буфера обмена...")
 
-    def apply_search(self):
-        query = self.search_var.get().strip().lower()
-        if not query:
-            self.table.load_entries(self.all_entries)
-            return
+    try:
+        loaded_clipboard_settings = clipboard_settings_store.load()
+    except Exception as exc:
+        print(f"[WARN] Не удалось загрузить clipboard-настройки: {exc}")
+        loaded_clipboard_settings = None
 
-        filtered = [
-            entry for entry in self.all_entries
-            if query in entry.get("title", "").lower()
-            or query in entry.get("username", "").lower()
-            or query in entry.get("url", "").lower()
-        ]
-        self.table.load_entries(filtered)
+    print("[INFO] Создаю сервисы audit logging Sprint 5...")
 
-    def get_single_entry_by_id(self, entry_id):
-        return self.entry_manager.get_entry(entry_id)
+    audit_signer = AuditLogSigner(master_key)
 
-    def on_table_left_click(self, event):
-        action, entry_id = self.table.identify_action(event)
-        if action == self.table.ACTION_COPY_PASSWORD:
-            self.copy_selected_password()
-        elif action == self.table.ACTION_COPY_USERNAME:
-            self.copy_selected_username()
+    audit_logger = AuditLogger(
+        db_path=DB_PATH,
+        signer=audit_signer,
+    )
 
-    def show_context_menu(self, event):
-        row_id = self.table.tree.identify_row(event.y)
-        if row_id:
-            self.table.tree.selection_set(row_id)
-            self.context_menu.tk_popup(event.x_root, event.y_root)
+    audit_verifier = AuditLogVerifier(
+        db_path=DB_PATH,
+        signer=audit_signer,
+    )
 
-    def secure_close(self):
+    audit_exporter = AuditLogExporter(
+        audit_logger=audit_logger,
+        signer=audit_signer,
+    )
+
+    audit_bridge = AuditEventBridge(audit_logger)
+
+    print("[INFO] Подключаю сервисы к главному окну...")
+
+    root.key_manager = key_manager
+    root.clipboard_settings_store = clipboard_settings_store
+
+    root.audit_logger = audit_logger
+    root.audit_verifier = audit_verifier
+    root.audit_exporter = audit_exporter
+    root.audit_bridge = audit_bridge
+
+    root.set_auth_service(auth_service)
+    root.set_entry_manager(entry_manager)
+    root.set_key_manager(key_manager)
+
+    if loaded_clipboard_settings is not None:
         try:
-            self.clipboard_service.close()
+            root.apply_clipboard_settings(loaded_clipboard_settings)
+        except Exception as exc:
+            print(f"[WARN] Не удалось применить clipboard-настройки: {exc}")
+
+    print("[INFO] Подписываю audit bridge на события EntryManager...")
+
+    try:
+        entry_manager.subscribe(audit_bridge.handle_event)
+    except Exception as exc:
+        print(f"[WARN] Не удалось подписать audit bridge на EntryManager: {exc}")
+
+    print("[INFO] Подписываю audit bridge на события ClipboardService...")
+
+    try:
+        root.clipboard_service.subscribe(audit_bridge.handle_event)
+    except Exception as exc:
+        print(f"[WARN] Не удалось подписать audit bridge на ClipboardService: {exc}")
+
+    print("[INFO] Записываю SYSTEM_STARTUP в audit log...")
+
+    try:
+        audit_logger.log_event(
+            event_type="SYSTEM_STARTUP",
+            severity=AuditSeverity.INFO.value,
+            source="main",
+            details={
+                "message": "Application started",
+                "db_path": str(DB_PATH),
+            },
+        )
+    except Exception as exc:
+        print(f"[WARN] Не удалось записать SYSTEM_STARTUP в audit log: {exc}")
+
+
+def main() -> None:
+    ensure_data_dir()
+
+    print("[INFO] CryptoSafe Manager запускается...")
+    print(f"[INFO] BASE_DIR = {BASE_DIR}")
+    print(f"[INFO] DB_PATH = {DB_PATH}")
+
+    root = MainWindow()
+
+    root.withdraw()
+
+    try:
+        master_key, auth_service = run_auth_dialog(root)
+
+        if master_key is None or auth_service is None:
+            print("[INFO] Вход отменён. Приложение закрывается.")
+            root.destroy()
+            return
+
+        connect_vault_services(
+            root=root,
+            auth_service=auth_service,
+            master_key=master_key,
+        )
+
+        print("[INFO] Главное окно запущено.")
+
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+        root.mainloop()
+
+    except Exception as exc:
+        show_fatal_error("Критическая ошибка CryptoSafe Manager", exc)
+
+        try:
+            if hasattr(root, "audit_logger") and root.audit_logger is not None:
+                root.audit_logger.log_event(
+                    event_type="SYSTEM_FATAL_ERROR",
+                    severity=AuditSeverity.CRITICAL.value,
+                    source="main",
+                    details={
+                        "error_type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                )
         except Exception:
             pass
-        self.destroy()
+
+        try:
+            if hasattr(root, "secure_close"):
+                root.secure_close()
+            else:
+                root.destroy()
+        except Exception:
+            try:
+                root.destroy()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
-    app = MainWindow()
-    app.mainloop()
+    main()
