@@ -7,7 +7,6 @@ from datetime import datetime
 from difflib import SequenceMatcher
 from tkinter import messagebox, ttk
 from typing import Any
-from src.gui.dialogs.sprint6_dialogs import ExportDialog, ImportDialog, SharingDialog
 
 from src.core.clipboard.clipboard_monitor import ClipboardMonitor
 from src.core.clipboard.clipboard_service import (
@@ -23,6 +22,7 @@ from src.core.vault.password_generator import PasswordGenerator
 from src.gui.change_password_dialog import ChangePasswordDialog
 from src.gui.entry_dialog import EntryDialog
 from src.gui.settings_dialog import SettingsDialog
+from src.gui.sprint7_security_integration import Sprint7SecurityIntegration
 from src.gui.widgets.audit_log_viewer import AuditLogViewer
 from src.gui.widgets.vault_table import VaultTable
 
@@ -72,6 +72,8 @@ class MainWindow(tk.Tk):
         self.auth_service = None
         self.entry_manager = None
         self.key_manager = None
+        self.audit_logger = None
+        self.event_bus = None
 
         self.all_entries: list[dict[str, Any]] = []
         self.displayed_entries: list[dict[str, Any]] = []
@@ -99,31 +101,55 @@ class MainWindow(tk.Tk):
 
         self.passwords_visible_var = tk.BooleanVar(value=False)
         self.search_history: deque[str] = deque(maxlen=self.SEARCH_HISTORY_LIMIT)
-
         self.clipboard_status_var = tk.StringVar(value="Буфер обмена: пусто")
+        self.status_var = tk.StringVar(value="Статус: заблокировано")
 
         self._build_menu()
         self._build_toolbar()
         self._build_table()
+        self._build_status_bar()
         self._bind_hotkeys()
 
         self.protocol("WM_DELETE_WINDOW", self.secure_close)
 
-        self.status_var = tk.StringVar(value="Статус: заблокировано")
-        self.status_frame = ttk.Frame(self)
-        self.status_frame.pack(fill="x", side="bottom", padx=10, pady=(0, 8))
+        self.sprint7_security = Sprint7SecurityIntegration(
+            lock_vault=self._sprint7_lock_vault,
+            unlock_vault=self._sprint7_unlock_vault,
+            clear_clipboard=self._sprint7_clear_clipboard,
+            wipe_memory=self._sprint7_wipe_memory,
+            close_sensitive_windows=self._sprint7_close_sensitive_windows,
+            show_main_window=self._sprint7_show_main_window,
+            open_settings=self._sprint7_open_settings,
+            exit_application=self._sprint7_exit_application,
+            quick_search=self._sprint7_quick_search,
+            audit_log=self._sprint7_audit_log,
+            auto_lock_timeout_seconds=300,
+        )
 
-        ttk.Label(
-            self.status_frame,
-            textvariable=self.status_var,
-            anchor="w",
-        ).pack(side="left", fill="x", expand=True)
+        try:
+            self.sprint7_security.start()
+        except Exception:
+            pass
 
-        ttk.Label(
-            self.status_frame,
-            textvariable=self.clipboard_status_var,
-            anchor="e",
-        ).pack(side="right")
+        try:
+            self.bind_all(
+                "<Key>",
+                lambda event: self.sprint7_security.record_keyboard_activity(),
+            )
+            self.bind_all(
+                "<Button>",
+                lambda event: self.sprint7_security.record_mouse_activity(),
+            )
+            self.bind_all(
+                "<FocusIn>",
+                lambda event: self.sprint7_security.record_focus_change(),
+            )
+            self.bind_all(
+                "<Control-Shift-Escape>",
+                lambda event: self.sprint7_security.activate_panic("hotkey"),
+            )
+        except Exception:
+            pass
 
         self.after(1000, self.update_clipboard_status_loop)
 
@@ -138,6 +164,13 @@ class MainWindow(tk.Tk):
     def set_key_manager(self, key_manager):
         self.key_manager = key_manager
 
+    def set_audit_logger(self, audit_logger):
+        self.audit_logger = audit_logger
+
+    def set_event_bus(self, event_bus):
+        self.event_bus = event_bus
+
+
     def _build_menu(self):
         menubar = tk.Menu(self)
 
@@ -145,11 +178,6 @@ class MainWindow(tk.Tk):
         file_menu.add_command(label="Создать", command=self._stub)
         file_menu.add_command(label="Открыть", command=self._stub)
         file_menu.add_command(label="Резервная копия", command=self._stub)
-        file_menu.add_separator()
-        file_menu.add_command(label="Экспорт хранилища", command=self._open_export_dialog)
-        file_menu.add_command(label="Импорт хранилища", command=self._open_import_dialog)
-        file_menu.add_command(label="Поделиться записью", command=self._open_sharing_dialog)
-        file_menu.add_separator()
         file_menu.add_separator()
         file_menu.add_command(
             label="Сменить мастер-пароль",
@@ -196,6 +224,30 @@ class MainWindow(tk.Tk):
             command=self.reveal_clipboard_preview_with_auth,
         )
 
+        security_menu = tk.Menu(menubar, tearoff=0)
+        security_menu.add_command(
+            label="Panic mode",
+            command=lambda: self.sprint7_security.activate_panic("menu"),
+            accelerator="Ctrl+Shift+Esc",
+        )
+        security_menu.add_command(
+            label="Свернуть в трей",
+            command=self._sprint7_minimize_to_tray,
+        )
+        security_menu.add_separator()
+        security_menu.add_command(
+            label="Профиль Standard",
+            command=lambda: self._sprint7_apply_profile("standard"),
+        )
+        security_menu.add_command(
+            label="Профиль Enhanced",
+            command=lambda: self._sprint7_apply_profile("enhanced"),
+        )
+        security_menu.add_command(
+            label="Профиль Paranoid",
+            command=lambda: self._sprint7_apply_profile("paranoid"),
+        )
+
         view_menu = tk.Menu(menubar, tearoff=0)
         view_menu.add_command(label="Логи", command=self.open_logs)
         view_menu.add_command(label="Настройки", command=self.open_settings)
@@ -205,6 +257,7 @@ class MainWindow(tk.Tk):
 
         menubar.add_cascade(label="Файл", menu=file_menu)
         menubar.add_cascade(label="Правка", menu=edit_menu)
+        menubar.add_cascade(label="Безопасность", menu=security_menu)
         menubar.add_cascade(label="Вид", menu=view_menu)
         menubar.add_cascade(label="Справка", menu=help_menu)
 
@@ -278,6 +331,12 @@ class MainWindow(tk.Tk):
 
         ttk.Button(
             toolbar,
+            text="Panic",
+            command=lambda: self.sprint7_security.activate_panic("toolbar"),
+        ).pack(side="left", padx=(6, 0))
+
+        ttk.Button(
+            toolbar,
             text="Предпросмотр",
             command=self.show_clipboard_preview,
         ).pack(side="left", padx=(6, 0))
@@ -294,7 +353,6 @@ class MainWindow(tk.Tk):
             values=[],
         )
         self.search_combo.pack(side="left")
-
         self.search_combo.bind("<<ComboboxSelected>>", lambda event: self.apply_search())
         self.search_combo.bind("<Return>", lambda event: self.remember_search_query())
 
@@ -353,29 +411,63 @@ class MainWindow(tk.Tk):
         self.table.tree.bind("<Button-3>", self.show_context_menu)
         self.table.tree.bind("<Button-1>", self.on_table_left_click)
 
-    def _bind_hotkeys(self):
-        self.bind_all("<Control-Shift-P>", lambda event: self.toggle_selected_passwords())
-        self.bind_all("<Control-Shift-p>", lambda event: self.toggle_selected_passwords())
+    def _build_status_bar(self):
+        self.status_frame = ttk.Frame(self)
+        self.status_frame.pack(fill="x", side="bottom", padx=10, pady=(0, 8))
 
-        self.bind_all("<Control-Shift-C>", lambda event: self.copy_selected_password())
-        self.bind_all("<Control-Shift-c>", lambda event: self.copy_selected_password())
+        ttk.Label(
+            self.status_frame,
+            textvariable=self.status_var,
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+
+        ttk.Label(
+            self.status_frame,
+            textvariable=self.clipboard_status_var,
+            anchor="e",
+        ).pack(side="right")
+
+    def _bind_hotkeys(self):
+        self.bind_all(
+            "<Control-Shift-P>",
+            lambda event: self.toggle_selected_passwords(),
+        )
+        self.bind_all(
+            "<Control-Shift-p>",
+            lambda event: self.toggle_selected_passwords(),
+        )
+        self.bind_all(
+            "<Control-Shift-C>",
+            lambda event: self.copy_selected_password(),
+        )
+        self.bind_all(
+            "<Control-Shift-c>",
+            lambda event: self.copy_selected_password(),
+        )
 
 
     def on_clipboard_event(self, event):
         if isinstance(event, ClipboardCopied):
             source_title = self.get_entry_title_by_id(event.source_entry_id)
 
-            self.table.set_clipboard_marker(
-                entry_id=event.source_entry_id,
-                data_type=event.data_type,
-            )
+            try:
+                self.table.set_clipboard_marker(
+                    entry_id=event.source_entry_id,
+                    data_type=event.data_type,
+                )
+            except Exception:
+                pass
+
+            try:
+                self.sprint7_security.set_clipboard_active(True)
+            except Exception:
+                pass
 
             if self.clipboard_settings.notifications_enabled:
                 self.clipboard_status_var.set(
                     f"Буфер: скопировано {event.data_type}, "
                     f"очистка через {event.timeout_seconds} сек."
                 )
-
                 self.show_toast(
                     "Буфер обмена",
                     f"Скопировано: {event.data_type}\n"
@@ -386,18 +478,24 @@ class MainWindow(tk.Tk):
         elif isinstance(event, ClipboardWarning):
             if self.clipboard_settings.notifications_enabled:
                 self.clipboard_status_var.set("Буфер: скоро будет очищен")
-
                 self.show_toast(
                     "Предупреждение",
                     f"Буфер обмена будет очищен через {event.remaining_seconds} сек.",
                 )
 
         elif isinstance(event, ClipboardCleared):
-            self.table.set_clipboard_marker(None, None)
+            try:
+                self.table.set_clipboard_marker(None, None)
+            except Exception:
+                pass
+
+            try:
+                self.sprint7_security.set_clipboard_active(False)
+            except Exception:
+                pass
 
             if self.clipboard_settings.notifications_enabled:
                 self.clipboard_status_var.set("Буфер обмена: очищен")
-
                 self.show_toast(
                     "Буфер обмена",
                     "Буфер обмена очищен.",
@@ -428,11 +526,7 @@ class MainWindow(tk.Tk):
             return
 
         remaining = int(status.remaining_seconds)
-
-        if status.ephemeral:
-            mode_text = "ephemeral"
-        else:
-            mode_text = "system"
+        mode_text = "ephemeral" if status.ephemeral else "system"
 
         if remaining > 0:
             self.clipboard_status_var.set(
@@ -525,6 +619,7 @@ class MainWindow(tk.Tk):
                 vault_unlocked=self.is_vault_unlocked(),
                 never_copy=bool(entry.get("never_copy_to_clipboard", False)),
             )
+
         except Exception as exc:
             messagebox.showerror(
                 "Буфер обмена",
@@ -533,7 +628,6 @@ class MainWindow(tk.Tk):
 
     def copy_selected_password(self):
         entry = self.get_single_selected_entry()
-
         if entry is None:
             return
 
@@ -545,7 +639,6 @@ class MainWindow(tk.Tk):
 
     def copy_selected_username(self):
         entry = self.get_single_selected_entry()
-
         if entry is None:
             return
 
@@ -557,7 +650,6 @@ class MainWindow(tk.Tk):
 
     def copy_selected_all(self):
         entry = self.get_single_selected_entry()
-
         if entry is None:
             return
 
@@ -588,7 +680,7 @@ class MainWindow(tk.Tk):
         except Exception:
             messagebox.showwarning(
                 "Буфер обмена",
-                "Не удалось очистить буфер обмена. Очистите его вручную.",
+                "Не удалось очистить буфер обмена.\nОчистите его вручную.",
             )
 
     def apply_clipboard_settings(self, settings: ClipboardSettings):
@@ -630,7 +722,6 @@ class MainWindow(tk.Tk):
 
             x = self.winfo_rootx() + self.winfo_width() - 330
             y = self.winfo_rooty() + self.winfo_height() - 150
-
             toast.geometry(f"300x90+{x}+{y}")
             toast.after(duration_ms, toast.destroy)
         except Exception:
@@ -693,6 +784,10 @@ class MainWindow(tk.Tk):
             plaintext,
         )
 
+    # =========================
+    # Table actions
+    # =========================
+
     def on_table_left_click(self, event):
         action, entry_id = self.table.identify_action(event)
 
@@ -703,26 +798,22 @@ class MainWindow(tk.Tk):
 
         if action == self.table.ACTION_COPY_PASSWORD:
             entry = self.get_single_entry_by_id(entry_id)
-
             if entry is not None:
                 self.copy_entry_field_to_clipboard(
                     entry=entry,
                     field_name="password",
                     data_type="password",
                 )
-
             return "break"
 
         if action == self.table.ACTION_COPY_USERNAME:
             entry = self.get_single_entry_by_id(entry_id)
-
             if entry is not None:
                 self.copy_entry_field_to_clipboard(
                     entry=entry,
                     field_name="username",
                     data_type="username",
                 )
-
             return "break"
 
         return None
@@ -734,14 +825,159 @@ class MainWindow(tk.Tk):
         try:
             self.all_entries = self.entry_manager.get_all_entries()
             self.apply_search(update_status=False)
-
             self.status_var.set(
                 f"Статус: разблокировано | "
                 f"Всего записей: {len(self.all_entries)} | "
                 f"Показано: {len(self.displayed_entries)}"
             )
+
+            try:
+                self.sprint7_security.mark_unlocked()
+            except Exception:
+                pass
+
         except Exception:
             messagebox.showerror("Ошибка", "Не удалось загрузить записи.")
+
+    def selected_entry_ids(self) -> list[int]:
+        selected_ids = self.table.get_selected_ids()
+
+        if not selected_ids:
+            messagebox.showwarning(
+                "Выбор записи",
+                "Выберите одну или несколько записей.",
+            )
+            return []
+
+        return selected_ids
+
+    def add_entry(self):
+        if self.entry_manager is None:
+            messagebox.showerror("Ошибка", "Хранилище не подключено.")
+            return
+
+        dialog = EntryDialog(self)
+        self.wait_window(dialog)
+
+        if dialog.result is None:
+            return
+
+        try:
+            self.entry_manager.create_entry(dialog.result)
+            self.refresh_entries()
+        except Exception:
+            messagebox.showerror(
+                "Ошибка",
+                "Не удалось сохранить запись.\nПроверьте данные формы.",
+            )
+
+    def edit_entry(self):
+        if self.entry_manager is None:
+            messagebox.showerror("Ошибка", "Хранилище не подключено.")
+            return
+
+        selected_ids = self.table.get_selected_ids()
+
+        if not selected_ids:
+            messagebox.showwarning("Выбор записи", "Выберите запись.")
+            return
+
+        if len(selected_ids) > 1:
+            messagebox.showwarning(
+                "Редактирование",
+                "Для редактирования выберите только одну запись.",
+            )
+            return
+
+        entry_id = selected_ids[0]
+
+        try:
+            current = self.entry_manager.get_entry(entry_id)
+        except Exception:
+            messagebox.showerror(
+                "Ошибка",
+                "Не удалось открыть выбранную запись.",
+            )
+            return
+
+        dialog = EntryDialog(self, current)
+        self.wait_window(dialog)
+
+        if dialog.result is None:
+            return
+
+        try:
+            self.entry_manager.update_entry(entry_id, dialog.result)
+            self.refresh_entries()
+        except Exception:
+            messagebox.showerror(
+                "Ошибка",
+                "Не удалось обновить запись.\nПроверьте данные формы.",
+            )
+
+    def delete_entry(self):
+        if self.entry_manager is None:
+            messagebox.showerror("Ошибка", "Хранилище не подключено.")
+            return
+
+        selected_ids = self.selected_entry_ids()
+
+        if not selected_ids:
+            return
+
+        if len(selected_ids) == 1:
+            text = "Удалить выбранную запись?"
+        else:
+            text = f"Удалить выбранные записи: {len(selected_ids)} шт.?"
+
+        answer = messagebox.askyesno("Удаление", text)
+
+        if not answer:
+            return
+
+        has_errors = False
+
+        for entry_id in selected_ids:
+            try:
+                self.entry_manager.delete_entry(entry_id, soft_delete=True)
+            except Exception:
+                has_errors = True
+
+        self.refresh_entries()
+
+        if has_errors:
+            messagebox.showerror(
+                "Ошибка удаления",
+                "Не удалось удалить некоторые выбранные записи.",
+            )
+
+    def toggle_global_passwords(self):
+        visible = self.passwords_visible_var.get()
+        self.table.set_global_password_visibility(visible)
+
+    def toggle_selected_passwords(self):
+        selected_ids = self.table.get_selected_ids()
+
+        if not selected_ids:
+            messagebox.showwarning(
+                "Выбор записи",
+                "Выберите запись для показа или скрытия пароля.",
+            )
+            return
+
+        self.table.toggle_selected_password_visibility()
+
+    def show_context_menu(self, event):
+        row_id = self.table.tree.identify_row(event.y)
+
+        if row_id:
+            current_selection = set(self.table.tree.selection())
+
+            if row_id not in current_selection:
+                self.table.tree.selection_set(row_id)
+
+            self.context_menu.tk_popup(event.x_root, event.y_root)
+
 
     def apply_search(self, update_status: bool = True):
         query = self.search_var.get().strip()
@@ -756,6 +992,7 @@ class MainWindow(tk.Tk):
             return
 
         parsed = self.parse_search_query(query)
+
         filtered = []
 
         for entry in self.all_entries:
@@ -764,7 +1001,6 @@ class MainWindow(tk.Tk):
 
         self.displayed_entries = filtered
         self.table.load_entries(self.displayed_entries)
-
         self._update_status_after_search(update_status)
 
     def _update_status_after_search(self, update_status: bool = True):
@@ -813,8 +1049,7 @@ class MainWindow(tk.Tk):
 
             if field:
                 filters.setdefault(field, []).append(raw_value)
-
-            consumed_spans.append(match.span())
+                consumed_spans.append(match.span())
 
         remaining_parts = []
         last_index = 0
@@ -822,7 +1057,6 @@ class MainWindow(tk.Tk):
         for start, end in consumed_spans:
             if start > last_index:
                 remaining_parts.append(query[last_index:start])
-
             last_index = end
 
         if last_index < len(query):
@@ -836,6 +1070,7 @@ class MainWindow(tk.Tk):
                 for part in re.findall(r'"[^"]+"|\S+', remaining_text)
                 if part.strip()
             ]
+
             free_terms = [
                 term[1:-1] if term.startswith('"') and term.endswith('"') else term
                 for term in free_terms
@@ -941,7 +1176,6 @@ class MainWindow(tk.Tk):
             return False
 
         ratio = SequenceMatcher(None, query, candidate).ratio()
-
         return ratio >= self.FUZZY_THRESHOLD
 
     def entry_date_is_after_or_equal(self, entry: dict[str, Any], date_value: str) -> bool:
@@ -1029,144 +1263,6 @@ class MainWindow(tk.Tk):
             ),
         )
 
-    def selected_entry_ids(self) -> list[int]:
-        selected_ids = self.table.get_selected_ids()
-
-        if not selected_ids:
-            messagebox.showwarning(
-                "Выбор записи",
-                "Выберите одну или несколько записей.",
-            )
-            return []
-
-        return selected_ids
-
-    def add_entry(self):
-        if self.entry_manager is None:
-            messagebox.showerror("Ошибка", "Хранилище не подключено.")
-            return
-
-        dialog = EntryDialog(self)
-        self.wait_window(dialog)
-
-        if dialog.result is None:
-            return
-
-        try:
-            self.entry_manager.create_entry(dialog.result)
-            self.refresh_entries()
-        except Exception:
-            messagebox.showerror(
-                "Ошибка",
-                "Не удалось сохранить запись. Проверьте данные формы.",
-            )
-
-    def edit_entry(self):
-        if self.entry_manager is None:
-            messagebox.showerror("Ошибка", "Хранилище не подключено.")
-            return
-
-        selected_ids = self.table.get_selected_ids()
-
-        if not selected_ids:
-            messagebox.showwarning("Выбор записи", "Выберите запись.")
-            return
-
-        if len(selected_ids) > 1:
-            messagebox.showwarning(
-                "Редактирование",
-                "Для редактирования выберите только одну запись.",
-            )
-            return
-
-        entry_id = selected_ids[0]
-
-        try:
-            current = self.entry_manager.get_entry(entry_id)
-        except Exception:
-            messagebox.showerror(
-                "Ошибка",
-                "Не удалось открыть выбранную запись.",
-            )
-            return
-
-        dialog = EntryDialog(self, current)
-        self.wait_window(dialog)
-
-        if dialog.result is None:
-            return
-
-        try:
-            self.entry_manager.update_entry(entry_id, dialog.result)
-            self.refresh_entries()
-        except Exception:
-            messagebox.showerror(
-                "Ошибка",
-                "Не удалось обновить запись. Проверьте данные формы.",
-            )
-
-    def delete_entry(self):
-        if self.entry_manager is None:
-            messagebox.showerror("Ошибка", "Хранилище не подключено.")
-            return
-
-        selected_ids = self.selected_entry_ids()
-
-        if not selected_ids:
-            return
-
-        if len(selected_ids) == 1:
-            text = "Удалить выбранную запись?"
-        else:
-            text = f"Удалить выбранные записи: {len(selected_ids)} шт.?"
-
-        answer = messagebox.askyesno("Удаление", text)
-
-        if not answer:
-            return
-
-        has_errors = False
-
-        for entry_id in selected_ids:
-            try:
-                self.entry_manager.delete_entry(entry_id, soft_delete=True)
-            except Exception:
-                has_errors = True
-
-        self.refresh_entries()
-
-        if has_errors:
-            messagebox.showerror(
-                "Ошибка удаления",
-                "Не удалось удалить некоторые выбранные записи.",
-            )
-
-    def toggle_global_passwords(self):
-        visible = self.passwords_visible_var.get()
-        self.table.set_global_password_visibility(visible)
-
-    def toggle_selected_passwords(self):
-        selected_ids = self.table.get_selected_ids()
-
-        if not selected_ids:
-            messagebox.showwarning(
-                "Выбор записи",
-                "Выберите запись для показа или скрытия пароля.",
-            )
-            return
-
-        self.table.toggle_selected_password_visibility()
-
-    def show_context_menu(self, event):
-        row_id = self.table.tree.identify_row(event.y)
-
-        if row_id:
-            current_selection = set(self.table.tree.selection())
-
-            if row_id not in current_selection:
-                self.table.tree.selection_set(row_id)
-
-            self.context_menu.tk_popup(event.x_root, event.y_root)
 
     def open_logs(self):
         win = tk.Toplevel(self)
@@ -1194,6 +1290,188 @@ class MainWindow(tk.Tk):
         dialog = ChangePasswordDialog(self, self.auth_service)
         self.wait_window(dialog)
 
+    def about(self):
+        messagebox.showinfo(
+            "О программе",
+            "CryptoSafe Manager — secure vault with clipboard, audit, import/export and Sprint 7 security hardening.",
+        )
+
+    def _stub(self):
+        messagebox.showinfo(
+            "Заглушка",
+            "Это действие будет реализовано позже.",
+        )
+
+    def _sprint7_lock_vault(self) -> None:
+        if hasattr(self, "_lock_vault"):
+            try:
+                self._lock_vault()
+                return
+            except Exception:
+                pass
+
+        if hasattr(self, "state_manager"):
+            try:
+                self.state_manager.lock()
+            except Exception:
+                pass
+
+        try:
+            self.secure_clear_decrypted_data()
+            self.status_var.set("Статус: заблокировано")
+        except Exception:
+            pass
+
+    def _sprint7_unlock_vault(self) -> None:
+        if hasattr(self, "_unlock_vault"):
+            try:
+                self._unlock_vault()
+            except Exception:
+                pass
+
+    def _sprint7_clear_clipboard(self) -> None:
+        if hasattr(self, "clipboard_service"):
+            try:
+                self.clipboard_service.clear_clipboard(reason="panic")
+                return
+            except Exception:
+                pass
+
+        try:
+            self.clipboard_clear()
+        except Exception:
+            pass
+
+    def _sprint7_wipe_memory(self) -> None:
+        for attr_name in ("all_entries", "displayed_entries", "current_entry", "selected_entry"):
+            if hasattr(self, attr_name):
+                try:
+                    value = getattr(self, attr_name)
+
+                    if isinstance(value, list):
+                        value.clear()
+                    else:
+                        setattr(self, attr_name, None)
+                except Exception:
+                    pass
+
+        try:
+            self.secure_clear_decrypted_data()
+        except Exception:
+            pass
+
+    def _sprint7_close_sensitive_windows(self) -> None:
+        try:
+            for child in self.winfo_children():
+                try:
+                    if child is not self:
+                        child.destroy()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _sprint7_show_main_window(self) -> None:
+        try:
+            self.deiconify()
+            self.lift()
+            self.focus_force()
+        except Exception:
+            pass
+
+    def _sprint7_open_settings(self) -> None:
+        if hasattr(self, "_open_settings"):
+            try:
+                self._open_settings()
+                return
+            except Exception:
+                pass
+
+        if hasattr(self, "open_settings"):
+            try:
+                self.open_settings()
+            except Exception:
+                pass
+
+    def _sprint7_exit_application(self) -> None:
+        try:
+            if hasattr(self, "sprint7_security"):
+                self.sprint7_security.stop()
+        except Exception:
+            pass
+
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+    def _sprint7_quick_search(self, query: str) -> list[dict]:
+        entries = getattr(self, "all_entries", [])
+
+        if not isinstance(entries, list):
+            return []
+
+        if not query:
+            return entries[:10]
+
+        result = []
+        query_lower = query.lower()
+
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+
+            title = str(entry.get("title", "")).lower()
+            username = str(entry.get("username", "")).lower()
+            url = str(entry.get("url", "")).lower()
+
+            if query_lower in title or query_lower in username or query_lower in url:
+                result.append(entry)
+
+            if len(result) >= 10:
+                break
+
+        return result
+
+    def _sprint7_audit_log(self, event_type: str, details: dict) -> None:
+        if hasattr(self, "audit_logger") and self.audit_logger is not None:
+            try:
+                self.audit_logger.log_event(event_type, details)
+                return
+            except Exception:
+                pass
+
+        if hasattr(self, "event_bus") and self.event_bus is not None:
+            try:
+                self.event_bus.publish(event_type, details)
+                return
+            except Exception:
+                pass
+
+    def _sprint7_minimize_to_tray(self) -> None:
+        try:
+            self.sprint7_security.minimize_to_tray()
+            self.withdraw()
+        except Exception:
+            pass
+
+    def _sprint7_apply_profile(self, profile_name: str) -> None:
+        try:
+            profile = self.sprint7_security.apply_security_profile(profile_name)
+            messagebox.showinfo(
+                "Профиль безопасности",
+                f"Применён профиль: {profile.name.value}",
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Профиль безопасности",
+                f"Не удалось применить профиль: {exc}",
+            )
+
+    # =========================
+    # Secure close
+    # =========================
+
     def secure_clear_decrypted_data(self):
         try:
             self.all_entries.clear()
@@ -1210,9 +1488,18 @@ class MainWindow(tk.Tk):
         except Exception:
             pass
 
-        self.passwords_visible_var.set(False)
+        try:
+            self.passwords_visible_var.set(False)
+        except Exception:
+            pass
 
     def secure_close(self):
+        try:
+            if hasattr(self, "sprint7_security"):
+                self.sprint7_security.stop()
+        except Exception:
+            pass
+
         self.secure_clear_decrypted_data()
 
         try:
@@ -1238,43 +1525,3 @@ class MainWindow(tk.Tk):
             pass
 
         self.destroy()
-
-    def about(self):
-        messagebox.showinfo(
-            "О программе",
-            "CryptoSafe Manager — Sprint 4: secure clipboard with auto-clear",
-        )
-
-    def _stub(self):
-        messagebox.showinfo(
-            "Заглушка",
-            "Это действие будет реализовано позже.",
-        )
-
-    def _open_export_dialog(self):
-        from src.gui.dialogs.sprint6_dialogs import ExportDialog
-
-        ExportDialog(
-            parent=self,
-            entry_manager=self.entry_manager,
-            audit_logger=getattr(self, "audit_logger", None),
-            master_password_verifier=getattr(self, "verify_master_password", None),
-        )
-
-    def _open_import_dialog(self):
-        from src.gui.dialogs.sprint6_dialogs import ImportDialog
-
-        ImportDialog(
-            parent=self,
-            entry_manager=self.entry_manager,
-            audit_logger=getattr(self, "audit_logger", None),
-        )
-
-    def _open_sharing_dialog(self):
-        from src.gui.dialogs.sprint6_dialogs import SharingDialog
-
-        SharingDialog(
-            parent=self,
-            db_connection=self.entry_manager,
-            audit_logger=getattr(self, "audit_logger", None),
-        )
