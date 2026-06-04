@@ -370,3 +370,119 @@ class StackSecret:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
+class MMapLockedBuffer:
+    def __init__(self, size: int):
+        if size <= 0:
+            raise ValueError("size must be positive")
+
+        self.size = size
+        self.closed = False
+        self.locked = False
+        self._mmap = None
+        self._fallback_buffer = None
+        self._memory = SecureMemory()
+
+        try:
+            import mmap
+
+            flags = getattr(mmap, "MAP_PRIVATE", 0)
+            flags |= getattr(mmap, "MAP_ANONYMOUS", getattr(mmap, "MAP_ANON", 0))
+
+            if hasattr(mmap, "MAP_LOCKED"):
+                flags |= mmap.MAP_LOCKED
+
+            self._mmap = mmap.mmap(
+                -1,
+                self.size,
+                flags=flags,
+                prot=mmap.PROT_READ | mmap.PROT_WRITE,
+            )
+            self.locked = hasattr(mmap, "MAP_LOCKED")
+        except Exception:
+            self._fallback_buffer = self._memory.allocate(self.size)
+            self.locked = self._memory.lock(self._fallback_buffer, self.size)
+
+    def write(self, data: bytes) -> None:
+        if self.closed:
+            raise MemoryGuardError("MMapLockedBuffer is already closed")
+
+        if len(data) > self.size:
+            raise ValueError("data is larger than buffer")
+
+        if self._mmap is not None:
+            self._mmap.seek(0)
+            self._mmap.write(b"\x00" * self.size)
+            self._mmap.seek(0)
+            self._mmap.write(data)
+            return
+
+        for index in range(self.size):
+            self._fallback_buffer[index] = 0
+
+        for index, byte in enumerate(data):
+            self._fallback_buffer[index] = byte
+
+    def read(self) -> bytes:
+        if self.closed:
+            raise MemoryGuardError("MMapLockedBuffer is already closed")
+
+        if self._mmap is not None:
+            self._mmap.seek(0)
+            return self._mmap.read(self.size).rstrip(b"\x00")
+
+        return bytes(self._fallback_buffer[: self.size]).rstrip(b"\x00")
+
+    def close(self) -> None:
+        if self.closed:
+            return
+
+        if self._mmap is not None:
+            self._mmap.seek(0)
+            self._mmap.write(b"\x00" * self.size)
+            self._mmap.close()
+        elif self._fallback_buffer is not None:
+            self._memory.secure_zero(self._fallback_buffer, self.size)
+            self._memory.unlock(self._fallback_buffer, self.size)
+
+        self.closed = True
+
+    def __enter__(self) -> "MMapLockedBuffer":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+
+class VolatileSecret:
+
+    def __init__(self, data: bytes):
+        if not isinstance(data, bytes):
+            raise TypeError("VolatileSecret requires bytes")
+
+        self._memory = SecureMemory()
+        self._data = bytearray(data)
+        self._closed = False
+
+    def reveal(self) -> bytes:
+        if self._closed:
+            raise MemoryGuardError("VolatileSecret is already closed")
+
+        return bytes(self._data)
+
+    def wipe(self) -> None:
+        if self._closed:
+            return
+
+        if hasattr(self._memory, "wipe_bytearray"):
+            self._memory.wipe_bytearray(self._data)
+        else:
+            for index in range(len(self._data)):
+                self._data[index] = 0
+
+        self._closed = True
+
+    def __enter__(self) -> "VolatileSecret":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.wipe()

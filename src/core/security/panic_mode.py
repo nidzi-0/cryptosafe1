@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import webbrowser
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -13,6 +14,8 @@ class PanicAction(str, Enum):
     CLOSE_WINDOWS = "close_windows"
     EXIT_APPLICATION = "exit_application"
     FAKE_ERROR = "fake_error"
+    LAUNCH_DECOY = "launch_decoy"
+    REDIRECT_SAFE_SITE = "redirect_safe_site"
 
 
 @dataclass
@@ -21,6 +24,8 @@ class PanicModeConfig:
     close_application: bool = False
     stealth_mode: bool = False
     fake_error_message: str = "Application error. Please restart CryptoSafe Manager."
+    decoy_application: str = "notepad"
+    safe_redirect_url: str = "https://www.wikipedia.org"
     enabled_actions: list[PanicAction] = field(
         default_factory=lambda: [
             PanicAction.LOCK_VAULT,
@@ -50,6 +55,8 @@ class PanicMode:
         close_windows: Callable[[], None] | None = None,
         exit_application: Callable[[], None] | None = None,
         show_fake_error: Callable[[str], None] | None = None,
+        launch_decoy_application: Callable[[str], None] | None = None,
+        redirect_to_safe_website: Callable[[str], None] | None = None,
         audit_log: Callable[[str, dict], None] | None = None,
     ):
         self.config = config or PanicModeConfig()
@@ -59,6 +66,8 @@ class PanicMode:
         self.close_windows = close_windows
         self.exit_application = exit_application
         self.show_fake_error = show_fake_error
+        self.launch_decoy_application = launch_decoy_application
+        self.redirect_to_safe_website = redirect_to_safe_website
         self.audit_log = audit_log
         self.last_event: PanicEvent | None = None
 
@@ -70,9 +79,18 @@ class PanicMode:
                 self._execute_action(action)
                 actions_executed.append(action.value)
 
-            if self.config.stealth_mode and self.show_fake_error is not None:
-                self.show_fake_error(self.config.fake_error_message)
-                actions_executed.append(PanicAction.FAKE_ERROR.value)
+            if self.config.stealth_mode:
+                if self.show_fake_error is not None:
+                    self.show_fake_error(self.config.fake_error_message)
+                    actions_executed.append(PanicAction.FAKE_ERROR.value)
+
+                if self.launch_decoy_application is not None:
+                    self.launch_decoy_application(self.config.decoy_application)
+                    actions_executed.append(PanicAction.LAUNCH_DECOY.value)
+
+                if self.redirect_to_safe_website is not None:
+                    self.redirect_to_safe_website(self.config.safe_redirect_url)
+                    actions_executed.append(PanicAction.REDIRECT_SAFE_SITE.value)
 
             if self.config.close_application and self.exit_application is not None:
                 self.exit_application()
@@ -102,9 +120,6 @@ class PanicMode:
             return event
 
     def recover(self, master_password_verified: bool) -> bool:
-        """
-        Recovery is allowed only after master password verification.
-        """
         return bool(master_password_verified)
 
     def _execute_action(self, action: PanicAction) -> None:
@@ -118,6 +133,9 @@ class PanicMode:
         callback = callbacks.get(action)
         if callback is not None:
             callback()
+
+    def open_safe_website_default(self, url: str) -> None:
+        webbrowser.open(url)
 
     def _audit(self, event: PanicEvent) -> None:
         if self.audit_log is None:

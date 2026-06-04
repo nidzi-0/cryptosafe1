@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
@@ -22,6 +23,13 @@ class TrayMenuItem:
 
 
 @dataclass
+class TrayIconState:
+    color: str
+    animated: bool
+    frame: int = 0
+
+
+@dataclass
 class TrayStatus:
     state: TrayState = TrayState.LOCKED
     tooltip: str = "CryptoSafe Manager locked"
@@ -29,6 +37,9 @@ class TrayStatus:
     background_running: bool = False
     minimized_to_tray: bool = False
     notifications: list[str] = field(default_factory=list)
+    icon: TrayIconState = field(
+        default_factory=lambda: TrayIconState(color="red", animated=False)
+    )
 
 
 class TrayService:
@@ -56,6 +67,7 @@ class TrayService:
         self.status = TrayStatus()
         self._lock = threading.RLock()
         self._running = False
+        self._frames = itertools.cycle(range(4))
 
     def start(self) -> None:
         with self._lock:
@@ -66,6 +78,7 @@ class TrayService:
         with self._lock:
             self._running = False
             self.status.background_running = False
+            self.status.icon.animated = False
 
     def is_running(self) -> bool:
         with self._lock:
@@ -75,6 +88,29 @@ class TrayService:
         with self._lock:
             self.status.state = state
             self.status.tooltip = self._tooltip_for_state(state)
+            self.status.icon = self._icon_for_state(state)
+
+    def _icon_for_state(self, state: TrayState) -> TrayIconState:
+        if state == TrayState.LOCKED:
+            return TrayIconState(color="red", animated=False)
+        if state == TrayState.UNLOCKED:
+            return TrayIconState(color="green", animated=False)
+        if state == TrayState.WARNING:
+            return TrayIconState(color="yellow", animated=False)
+        if state == TrayState.BUSY:
+            return TrayIconState(color="blue", animated=True, frame=next(self._frames))
+        return TrayIconState(color="gray", animated=False)
+
+    def animate_crypto_operation(self) -> TrayIconState:
+        with self._lock:
+            self.status.state = TrayState.BUSY
+            self.status.tooltip = self._tooltip_for_state(TrayState.BUSY)
+            self.status.icon = TrayIconState(
+                color="blue",
+                animated=True,
+                frame=next(self._frames),
+            )
+            return self.status.icon
 
     def set_clipboard_active(self, active: bool) -> None:
         with self._lock:
@@ -128,6 +164,8 @@ class TrayService:
             return None
 
         if action == "quick_search":
+            if self.status.state == TrayState.LOCKED:
+                return []
             if self.quick_search is None:
                 return []
             return self.quick_search(query)
@@ -158,7 +196,7 @@ class TrayService:
         raise ValueError(f"Unknown tray action: {action}")
 
     def operation_started(self) -> None:
-        self.set_state(TrayState.BUSY)
+        self.animate_crypto_operation()
 
     def operation_finished(self, locked: bool = False) -> None:
         self.set_state(TrayState.LOCKED if locked else TrayState.UNLOCKED)

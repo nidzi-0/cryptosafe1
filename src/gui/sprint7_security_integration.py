@@ -7,6 +7,11 @@ from src.core.security.activity_monitor import ActivityMonitor, AutoLockConfig
 from src.core.security.panic_mode import PanicAction, PanicMode, PanicModeConfig
 from src.core.security.security_profiles import SecurityProfileManager
 from src.core.security.tray_service import TrayService, TrayState
+from src.core.security.session_recovery import (
+    SessionRecoveryManager,
+    VaultSessionState,
+    WindowState,
+)
 
 
 @dataclass
@@ -38,6 +43,9 @@ class Sprint7SecurityIntegration:
         self._audit_log = audit_log
 
         self.profile_manager = SecurityProfileManager()
+        self.session_recovery = SessionRecoveryManager(
+            audit_log=audit_log,
+        )
 
         self.activity_monitor = ActivityMonitor(
             lock_callback=self.lock_due_to_inactivity,
@@ -182,3 +190,73 @@ class Sprint7SecurityIntegration:
             return
 
         self._audit_log(event_type, details)
+    def create_session_snapshot(
+        self,
+        selected_entry_ids: list[int] | None = None,
+        search_query: str = "",
+        table_scroll_position: float = 0.0,
+        password_visibility_enabled: bool = False,
+        window_geometry: str = "",
+        window_visible: bool = True,
+    ):
+        state = VaultSessionState(
+            selected_entry_ids=selected_entry_ids or [],
+            search_query=search_query,
+            table_scroll_position=table_scroll_position,
+            password_visibility_enabled=password_visibility_enabled,
+            active_security_profile=self.profile_manager.current_profile.name.value,
+            window_state=WindowState(
+                geometry=window_geometry,
+                is_visible=window_visible,
+                minimized_to_tray=self.tray_service.status.minimized_to_tray,
+            ),
+        )
+
+        return self.session_recovery.create_snapshot(state)
+
+    def resume_from_lock(self, master_password_verified: bool):
+        restored = self.session_recovery.restore_snapshot(
+            master_password_verified=master_password_verified,
+        )
+        self.activity_monitor.resume_after_unlock()
+        self.mark_unlocked()
+        return restored
+
+    def recover_from_panic(self, master_password_verified: bool):
+        restored = self.session_recovery.restore_snapshot(
+            master_password_verified=master_password_verified,
+        )
+        self.panic_mode.recover(master_password_verified)
+        self.mark_unlocked()
+        self._audit(
+            "panic_recovery_completed",
+            {
+                "restored_search_query": restored.search_query,
+                "selected_count": len(restored.selected_entry_ids),
+            },
+        )
+        return restored
+
+    def minimize_to_tray_with_snapshot(
+        self,
+        selected_entry_ids: list[int] | None = None,
+        search_query: str = "",
+        table_scroll_position: float = 0.0,
+        password_visibility_enabled: bool = False,
+        window_geometry: str = "",
+    ):
+        snapshot = self.create_session_snapshot(
+            selected_entry_ids=selected_entry_ids,
+            search_query=search_query,
+            table_scroll_position=table_scroll_position,
+            password_visibility_enabled=password_visibility_enabled,
+            window_geometry=window_geometry,
+            window_visible=False,
+        )
+        self.minimize_to_tray()
+        return snapshot
+
+    def restore_from_tray_with_state(self, master_password_verified: bool):
+        restored = self.session_recovery.restore_snapshot(master_password_verified)
+        self.restore_from_tray()
+        return restored

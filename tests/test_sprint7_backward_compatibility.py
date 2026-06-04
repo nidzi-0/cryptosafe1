@@ -31,6 +31,7 @@ def test_sprint7_can_clear_existing_clipboard_service_from_panic_mode():
         data_type="password",
         source_entry_id=1,
         vault_unlocked=True,
+        ephemeral=True,
     )
 
     assert service.get_status().active is True
@@ -61,6 +62,7 @@ def test_sprint7_tray_state_can_reflect_clipboard_service_activity():
         data_type="password",
         source_entry_id=1,
         vault_unlocked=True,
+        ephemeral=True,
     )
 
     tray.set_clipboard_active(service.get_status().active)

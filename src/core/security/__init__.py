@@ -2,16 +2,71 @@ from .side_channel_protection import ConstantTime, SideChannelProtector, TimingN
 from .memory_guard import (
     CanaryCorruptionError,
     MemoryDumpScanner,
+    MMapLockedBuffer,
     SecretHolder,
     SecureHeapAllocator,
     SecureHeapBlock,
     SecureMemory,
     StackSecret,
+    VolatileSecret,
+)
+from .session_recovery import (
+    MasterPasswordRequiredError,
+    SessionIntegrityError,
+    SessionRecoveryManager,
+    SignedSessionSnapshot,
+    VaultSessionState,
+    WindowState,
+)
+from .ux_accessibility import (
+    AccessibilityElement,
+    KeyboardShortcut,
+    ProgressIndicator,
+    ProgressState,
+    SecurityColor,
+    UserFriendlyError,
+    UXAccessibilityManager,
+)
+from .settings_validation import (
+    SecuritySettings,
+    SecuritySettingsValidator,
+    SettingsValidationResult,
+)
+from .integration_hardening import (
+    AuditHardeningIntegration,
+    ClipboardHardeningIntegration,
+    HardenedOperationResult,
+    ImportExportHardeningIntegration,
+    PanicInterruptedError,
+    PanicInterruptController,
+    SecurityHardeningIntegrator,
+    VaultHardeningIntegration,
+)
+from .platform_security import (
+    PlatformFeature,
+    PlatformFeatureStatus,
+    PlatformSecurityManager,
+    PlatformSecurityReport,
+)
+from .security_requirements import (
+    SecurityRequirementResult,
+    SecurityRequirementValidator,
 )
 from .activity_monitor import ActivityMonitor, AutoLockConfig, ActivitySensitivity
+from .screen_lock_detector import ScreenLockDetector, ScreenLockEvent, ScreenLockState
+from .shake_detector import ShakeDetector, MousePoint
 from .panic_mode import PanicMode, PanicModeConfig, PanicAction, PanicEvent
 from .security_profiles import SecurityProfileManager, SecurityProfileName, SecurityProfile
 from .tray_service import TrayService, TrayState, TrayStatus, TrayMenuItem
+from .physical_security import (
+    ElectromagneticEmanationPolicy,
+    ElectromagneticProtectionConfig,
+    PhysicalMitigationStatus,
+    PhysicalSecurityManager,
+    PhysicalSecurityReport,
+    PowerAnalysisConfig,
+    PowerAnalysisMitigator,
+)
 
 __all__ = [
     "ConstantTime",
@@ -23,6 +78,8 @@ __all__ = [
     "SecureHeapBlock",
     "CanaryCorruptionError",
     "StackSecret",
+    "MMapLockedBuffer",
+    "VolatileSecret",
     "MemoryDumpScanner",
     "ActivityMonitor",
     "AutoLockConfig",
@@ -38,4 +95,46 @@ __all__ = [
     "TrayState",
     "TrayStatus",
     "TrayMenuItem",
+    "PowerAnalysisConfig",
+    "PowerAnalysisMitigator",
+    "ElectromagneticProtectionConfig",
+    "ElectromagneticEmanationPolicy",
+    "PhysicalSecurityManager",
+    "PhysicalSecurityReport",
+    "PhysicalMitigationStatus",
+    "ScreenLockDetector",
+    "ScreenLockEvent",
+    "ScreenLockState",
+    "ShakeDetector",
+    "MousePoint",
+    "SessionRecoveryManager",
+    "VaultSessionState",
+    "WindowState",
+    "SignedSessionSnapshot",
+    "SessionIntegrityError",
+    "MasterPasswordRequiredError",
+    "AccessibilityElement",
+    "KeyboardShortcut",
+    "ProgressIndicator",
+    "ProgressState",
+    "SecurityColor",
+    "UserFriendlyError",
+    "UXAccessibilityManager",
+    "SecuritySettings",
+    "SecuritySettingsValidator",
+    "SettingsValidationResult",
+    "AuditHardeningIntegration",
+    "ClipboardHardeningIntegration",
+    "HardenedOperationResult",
+    "ImportExportHardeningIntegration",
+    "PanicInterruptedError",
+    "PanicInterruptController",
+    "SecurityHardeningIntegrator",
+    "VaultHardeningIntegration",
+    "PlatformFeature",
+    "PlatformFeatureStatus",
+    "PlatformSecurityManager",
+    "PlatformSecurityReport",
+    "SecurityRequirementResult",
+    "SecurityRequirementValidator",
 ]
