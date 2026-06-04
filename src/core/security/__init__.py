@@ -1,5 +1,13 @@
 from .side_channel_protection import ConstantTime, SideChannelProtector, TimingNoise
-from .memory_guard import SecureMemory, SecretHolder, MemoryDumpScanner
+from .memory_guard import (
+    CanaryCorruptionError,
+    MemoryDumpScanner,
+    SecretHolder,
+    SecureHeapAllocator,
+    SecureHeapBlock,
+    SecureMemory,
+    StackSecret,
+)
 from .activity_monitor import ActivityMonitor, AutoLockConfig, ActivitySensitivity
 from .panic_mode import PanicMode, PanicModeConfig, PanicAction, PanicEvent
 from .security_profiles import SecurityProfileManager, SecurityProfileName, SecurityProfile
@@ -11,6 +19,10 @@ __all__ = [
     "TimingNoise",
     "SecureMemory",
     "SecretHolder",
+    "SecureHeapAllocator",
+    "SecureHeapBlock",
+    "CanaryCorruptionError",
+    "StackSecret",
     "MemoryDumpScanner",
     "ActivityMonitor",
     "AutoLockConfig",
